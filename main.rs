@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use warp::ws::{WebSocket, Message};
 use futures::stream::SplitSink;
+use chrono::Utc;
 
 #[derive(Debug, Default)]
 struct InputState {
@@ -56,6 +57,7 @@ struct Player {
 
 #[derive(Debug, Serialize)]
 struct GameStateSnapshot {
+    time: u64, // server timestamp in ms
     players: HashMap<u32, ShipState>,
     ball: Ball,
 }
@@ -63,7 +65,7 @@ struct GameStateSnapshot {
 struct Game {
     ball: Ball,
     players: HashMap<u32, Player>,
-    // Store each client's sender as an Arc<Mutex<SplitSink<WebSocket, Message>>>
+    // Each client's sender is stored as an Arc<Mutex<SplitSink<WebSocket, Message>>>
     clients: HashMap<u32, Arc<Mutex<SplitSink<WebSocket, Message>>>>,
     next_id: u32,
 }
@@ -149,6 +151,11 @@ async fn game_update_loop() {
             if game.ball.active && !game.ball.grabbed {
                 game.ball.x += game.ball.vx * fixed_dt;
                 game.ball.y += game.ball.vy * fixed_dt;
+                // Apply friction/damping so the ball gradually slows down (optional).
+                let friction = 0.98;
+                game.ball.vx *= friction;
+                game.ball.vy *= friction;
+                // Bounce off walls.
                 if game.ball.x <= 0.0 || game.ball.x >= game_width {
                     game.ball.vx = -game.ball.vx;
                     game.ball.x = game.ball.x.clamp(0.0, game_width);
@@ -160,77 +167,94 @@ async fn game_update_loop() {
             }
             // --- Process ball grabbing ---
             {
-                let mut grab_update: Option<(bool, Option<u32>, f32, f32)> = None;
+                // Remove the velocity check; allow grabbing if cooldown is 0.
                 if !game.ball.grabbed && game.ball.shot_cooldown == 0.0 {
-                    // Iterate immutably over players.
+                    let mut closest_id: Option<u32> = None;
+                    let mut closest_dist2: f32 = f32::MAX;
+                    let mut new_x = 0.0;
+                    let mut new_y = 0.0;
                     for player in game.players.values() {
                         let dx = player.ship.x - game.ball.x;
                         let dy = player.ship.y - game.ball.y;
-                        if dx * dx + dy * dy < (40.0 * 40.0) {
-                            grab_update = Some((true, Some(player.id), player.ship.x, player.ship.y));
-                            break;
+                        let dist2 = dx * dx + dy * dy;
+                        if dist2 < (40.0 * 40.0) && dist2 < closest_dist2 {
+                            closest_dist2 = dist2;
+                            closest_id = Some(player.id);
+                            new_x = player.ship.x;
+                            new_y = player.ship.y;
                         }
                     }
-                }
-                if let Some((grabbed, owner, new_x, new_y)) = grab_update {
-                    game.ball.grabbed = grabbed;
-                    game.ball.owner = owner;
-                    game.ball.vx = 0.0;
-                    game.ball.vy = 0.0;
-                    game.ball.x = new_x;
-                    game.ball.y = new_y;
+                    if let Some(_id) = closest_id {
+                        game.ball.grabbed = true;
+                        game.ball.owner = closest_id;
+                        game.ball.vx = 0.0;
+                        game.ball.vy = 0.0;
+                        game.ball.x = new_x;
+                        game.ball.y = new_y;
+                    }
                 }
             }
             // --- Process shooting ---
-            let shoot_update = {
-                let ball_grabbed = game.ball.grabbed;
-                let ball_owner = game.ball.owner;
-                let mut update: Option<(f32, f32, f32, f32, u32)> = None;
-                // Iterate immutably to decide shooting parameters.
-                for player in game.players.values() {
-                    if player.input.shoot {
-                        if ball_grabbed && ball_owner == Some(player.id) {
+            // Only allow shooting if the ball is currently grabbed and the owner presses shoot.
+            let shoot_update = if game.ball.grabbed {
+                if let Some(owner_id) = game.ball.owner {
+                    if let Some(player) = game.players.get(&owner_id) {
+                        if player.input.shoot {
+                            // Calculate shot vector based on owner's input.
                             let target_x = player.input.target_x.unwrap_or(player.ship.x);
                             let target_y = player.input.target_y.unwrap_or(player.ship.y);
-                            let dx = target_x - player.ship.x;
-                            let dy = target_y - player.ship.y;
-                            let mag = (dx * dx + dy * dy).sqrt();
+                            let mut dx = target_x - player.ship.x;
+                            let mut dy = target_y - player.ship.y;
+                            let mut mag = (dx * dx + dy * dy).sqrt();
                             let ball_speed = 300.0;
-                            if mag > 0.0 {
-                                update = Some((dx, dy, mag, ball_speed, player.id));
+                            // If no target is provided (or target equals player's position), set a default upward shot.
+                            if mag <= 0.0 {
+                                dx = 0.0;
+                                dy = -1.0;
+                                mag = 1.0;
                             }
+                            Some((dx, dy, mag, ball_speed, owner_id))
+                        } else {
+                            None
                         }
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
-                // Now, clear the shoot flag for all players.
-                for player in game.players.values_mut() {
-                    player.input.shoot = false;
-                }
-                update
+            } else {
+                None
             };
             if let Some((dx, dy, mag, ball_speed, owner_id)) = shoot_update {
                 game.ball.vx = dx / mag * ball_speed;
                 game.ball.vy = dy / mag * ball_speed;
-                // Extract the player's ship position without holding an immutable borrow.
-                let (new_x, new_y) = {
+                // Extract the owner's ship position into a temporary variable.
+                let new_pos = {
                     if let Some(player) = game.players.get(&owner_id) {
                         (player.ship.x, player.ship.y)
                     } else {
                         (game.ball.x, game.ball.y)
                     }
                 };
-                game.ball.x = new_x;
-                game.ball.y = new_y;
+                game.ball.x = new_pos.0;
+                game.ball.y = new_pos.1;
                 game.ball.grabbed = false;
                 game.ball.owner = None;
-                game.ball.shot_cooldown = 0.5;
+                game.ball.shot_cooldown = 1.0;
+                // Clear the shoot flag for the owner.
+                if let Some(player) = game.players.get_mut(&owner_id) {
+                    player.input.shoot = false;
+                }
             }
-            // --- Build snapshot ---
+            // --- Build snapshot with server timestamp ---
+            let now = Utc::now().timestamp_millis() as u64;
             let mut players_snapshot = HashMap::new();
             for (id, player) in game.players.iter() {
                 players_snapshot.insert(*id, ShipState { x: player.ship.x, y: player.ship.y, seq: player.last_seq });
             }
             let snapshot = json!(GameStateSnapshot {
+                time: now,
                 players: players_snapshot,
                 ball: game.ball.clone(),
             });
