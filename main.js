@@ -6,14 +6,18 @@ class MainScene extends Phaser.Scene {
     this.predictedState = { x: 400, y: 300 };
     this.serverState = { ship: { x: 400, y: 300, seq: 0 } };
     // Dictionary for other players' ships.
-    this.otherShips = {};
+    // Each remote ship sprite will have a history array added to it.
+    this.otherShips = {}; 
     this.socket = null;
     this.ball = null;
     this.latestBallState = null;
+    // Buffer for ball snapshots.
     this.ballHistory = [];
     this.inputState = { left: false, right: false, up: false, down: false, shoot: false };
     this.inputSequence = 0;
     this.playerId = null; // Assigned by server.
+    // Offset to align server timestamp with local time.
+    this.serverTimeOffset = 0; 
   }
   
   preload() {
@@ -111,27 +115,32 @@ class MainScene extends Phaser.Scene {
           console.log('Assigned player id:', this.playerId);
           return;
         }
-        // Use server timestamp for interpolation.
+        // Server timestamp in ms.
         const serverTimestamp = state.time;
+        // Set offset on first snapshot.
+        if (!this.serverTimeOffset && serverTimestamp) {
+          this.serverTimeOffset = this.time.now - serverTimestamp;
+        }
   
+        // Update players.
         if (state.players) {
-          // Update your own ship state.
           if (state.players[this.playerId]) {
             this.serverState.ship = state.players[this.playerId];
           }
-          // Update other players.
           for (const id in state.players) {
             if (parseInt(id) === this.playerId) continue;
             const shipState = state.players[id];
             if (!this.otherShips[id]) {
-              this.otherShips[id] = this.add.sprite(shipState.x, shipState.y, 'ship').setScale(0.5).setOrigin(0.5, 0.5);
+              const sprite = this.add.sprite(shipState.x, shipState.y, 'ship').setScale(0.5).setOrigin(0.5, 0.5);
+              sprite.history = [{ x: shipState.x, y: shipState.y, timestamp: serverTimestamp }];
+              this.otherShips[id] = sprite;
             } else {
               const sprite = this.otherShips[id];
-              sprite.x = Phaser.Math.Linear(sprite.x, shipState.x, 0.1);
-              sprite.y = Phaser.Math.Linear(sprite.y, shipState.y, 0.1);
+              if (!sprite.history) sprite.history = [];
+              sprite.history.push({ x: shipState.x, y: shipState.y, timestamp: serverTimestamp });
+              if (sprite.history.length > 2) sprite.history.shift();
             }
           }
-          // Remove sprites for players no longer in state.
           for (const id in this.otherShips) {
             if (!state.players[id]) {
               this.otherShips[id].destroy();
@@ -139,14 +148,12 @@ class MainScene extends Phaser.Scene {
             }
           }
         }
-        // Handle ball state using server timestamp.
+        // Update ball history.
         if (state.ball && state.ball.active) {
           state.ball.timestamp = serverTimestamp;
           this.latestBallState = state.ball;
           this.ballHistory.push(state.ball);
-          if (this.ballHistory.length > 2) {
-            this.ballHistory.shift();
-          }
+          if (this.ballHistory.length > 10) this.ballHistory.shift();
         } else {
           this.ballHistory = [];
           this.latestBallState = null;
@@ -165,67 +172,95 @@ class MainScene extends Phaser.Scene {
     });
   }
   
+  // Update remote ships using history for interpolation/extrapolation.
+  updateRemoteShips(localTime) {
+    const renderTime = localTime - this.serverTimeOffset;
+    for (const id in this.otherShips) {
+      const sprite = this.otherShips[id];
+      if (sprite.history && sprite.history.length >= 2) {
+        const [older, newer] = sprite.history;
+        const deltaT = newer.timestamp - older.timestamp;
+        if (renderTime <= newer.timestamp) {
+          const t = (renderTime - older.timestamp) / deltaT;
+          sprite.x = Phaser.Math.Linear(older.x, newer.x, t);
+          sprite.y = Phaser.Math.Linear(older.y, newer.y, t);
+        } else {
+          let extraTime = renderTime - newer.timestamp;
+          extraTime = Math.min(extraTime, 100);
+          const vx = (newer.x - older.x) / deltaT;
+          const vy = (newer.y - older.y) / deltaT;
+          sprite.x = newer.x + vx * extraTime;
+          sprite.y = newer.y + vy * extraTime;
+        }
+      }
+    }
+  }
+  
+  // Update ball using its history.
+  updateBall(localTime) {
+    const renderTime = localTime - this.serverTimeOffset;
+    if (this.ballHistory.length >= 2) {
+      const older = this.ballHistory[0];
+      const newer = this.ballHistory[this.ballHistory.length - 1];
+      const deltaT = newer.timestamp - older.timestamp;
+      if (renderTime <= newer.timestamp) {
+        const t = (renderTime - older.timestamp) / deltaT;
+        this.ball.x = Phaser.Math.Linear(older.x, newer.x, t);
+        this.ball.y = Phaser.Math.Linear(older.y, newer.y, t);
+      } else {
+        let extraTime = renderTime - newer.timestamp;
+        extraTime = Math.min(extraTime, 100);
+        const vx = (newer.x - older.x) / deltaT;
+        const vy = (newer.y - older.y) / deltaT;
+        this.ball.x = newer.x + vx * extraTime;
+        this.ball.y = newer.y + vy * extraTime;
+      }
+    }
+  }
+  
   update(time, delta) {
-    // --- Update your own ship with prediction & reconciliation ---
+    // Update your own ship.
     const dt = delta / 1000;
     const shipSpeed = 100;
-    if (this.inputState.left) {
-      this.predictedState.x -= shipSpeed * dt;
-    }
-    if (this.inputState.right) {
-      this.predictedState.x += shipSpeed * dt;
-    }
-    if (this.inputState.up) {
-      this.predictedState.y -= shipSpeed * dt;
-    }
-    if (this.inputState.down) {
-      this.predictedState.y += shipSpeed * dt;
-    }
+    if (this.inputState.left) { this.predictedState.x -= shipSpeed * dt; }
+    if (this.inputState.right) { this.predictedState.x += shipSpeed * dt; }
+    if (this.inputState.up) { this.predictedState.y -= shipSpeed * dt; }
+    if (this.inputState.down) { this.predictedState.y += shipSpeed * dt; }
     const alpha = 0.05;
     this.predictedState.x = Phaser.Math.Linear(this.predictedState.x, this.serverState.ship.x, alpha);
     this.predictedState.y = Phaser.Math.Linear(this.predictedState.y, this.serverState.ship.y, alpha);
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
-  
-    // Draw gravity circle around your ship.
+    
+    // Draw gravity circle.
     this.gravityCircle.clear();
     this.gravityCircle.lineStyle(2, 0xff0000, 1);
     this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 40);
-  
-    // --- Update ball rendering ---
+    
+    // Update remote ships.
+    this.updateRemoteShips(time);
+    
+    // Update ball rendering.
     if (this.latestBallState && this.latestBallState.grabbed) {
-      // If the ball is grabbed, interpolate toward the owning ship.
+      // When grabbed, force the ball to appear at the grabbing ship.
+      let targetX, targetY;
       if (this.latestBallState.owner === this.playerId) {
-        this.ball.x = Phaser.Math.Linear(this.ball.x, this.ship.x, 0.3);
-        this.ball.y = Phaser.Math.Linear(this.ball.y, this.ship.y, 0.3);
+        targetX = this.ship.x;
+        targetY = this.ship.y;
       } else if (this.otherShips[this.latestBallState.owner]) {
-        const otherShip = this.otherShips[this.latestBallState.owner];
-        this.ball.x = Phaser.Math.Linear(this.ball.x, otherShip.x, 0.3);
-        this.ball.y = Phaser.Math.Linear(this.ball.y, otherShip.y, 0.3);
+        targetX = this.otherShips[this.latestBallState.owner].x;
+        targetY = this.otherShips[this.latestBallState.owner].y;
+      } else {
+        targetX = this.latestBallState.x;
+        targetY = this.latestBallState.y;
       }
+      this.ball.x = targetX;
+      this.ball.y = targetY;
+      // Ensure the ball is drawn on top.
       this.ball.setDepth(1);
       this.ball.setVisible(true);
     } else if (this.ballHistory.length > 0) {
-      const interpolationDelay = 100; // ms
-      const renderTimestamp = this.latestBallState ? this.latestBallState.timestamp - interpolationDelay : time;
-      let older = null;
-      let newer = null;
-      for (let i = 0; i < this.ballHistory.length - 1; i++) {
-        if (this.ballHistory[i].timestamp <= renderTimestamp && this.ballHistory[i + 1].timestamp >= renderTimestamp) {
-          older = this.ballHistory[i];
-          newer = this.ballHistory[i + 1];
-          break;
-        }
-      }
-      if (older && newer) {
-        const t = (renderTimestamp - older.timestamp) / (newer.timestamp - older.timestamp);
-        this.ball.x = Phaser.Math.Linear(older.x, newer.x, t);
-        this.ball.y = Phaser.Math.Linear(older.y, newer.y, t);
-      } else {
-        const latest = this.ballHistory[this.ballHistory.length - 1];
-        this.ball.x = latest.x;
-        this.ball.y = latest.y;
-      }
+      this.updateBall(time);
       this.ball.setDepth(0);
       this.ball.setVisible(true);
     } else {

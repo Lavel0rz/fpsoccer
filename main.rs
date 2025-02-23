@@ -151,7 +151,7 @@ async fn game_update_loop() {
             if game.ball.active && !game.ball.grabbed {
                 game.ball.x += game.ball.vx * fixed_dt;
                 game.ball.y += game.ball.vy * fixed_dt;
-                // Apply friction/damping so the ball gradually slows down (optional).
+                // Apply friction/damping so the ball gradually slows down.
                 let friction = 0.98;
                 game.ball.vx *= friction;
                 game.ball.vy *= friction;
@@ -167,7 +167,7 @@ async fn game_update_loop() {
             }
             // --- Process ball grabbing ---
             {
-                // Remove the velocity check; allow grabbing if cooldown is 0.
+                // Remove velocity check: a ship grabs the ball if within 40 pixels and cooldown is 0.
                 if !game.ball.grabbed && game.ball.shot_cooldown == 0.0 {
                     let mut closest_id: Option<u32> = None;
                     let mut closest_dist2: f32 = f32::MAX;
@@ -195,19 +195,18 @@ async fn game_update_loop() {
                 }
             }
             // --- Process shooting ---
-            // Only allow shooting if the ball is currently grabbed and the owner presses shoot.
+            // Only allow shooting if the ball is grabbed and the owner presses shoot.
             let shoot_update = if game.ball.grabbed {
                 if let Some(owner_id) = game.ball.owner {
                     if let Some(player) = game.players.get(&owner_id) {
                         if player.input.shoot {
-                            // Calculate shot vector based on owner's input.
+                            // Calculate shot vector from the owner's input.
                             let target_x = player.input.target_x.unwrap_or(player.ship.x);
                             let target_y = player.input.target_y.unwrap_or(player.ship.y);
                             let mut dx = target_x - player.ship.x;
                             let mut dy = target_y - player.ship.y;
                             let mut mag = (dx * dx + dy * dy).sqrt();
                             let ball_speed = 300.0;
-                            // If no target is provided (or target equals player's position), set a default upward shot.
                             if mag <= 0.0 {
                                 dx = 0.0;
                                 dy = -1.0;
@@ -229,7 +228,6 @@ async fn game_update_loop() {
             if let Some((dx, dy, mag, ball_speed, owner_id)) = shoot_update {
                 game.ball.vx = dx / mag * ball_speed;
                 game.ball.vy = dy / mag * ball_speed;
-                // Extract the owner's ship position into a temporary variable.
                 let new_pos = {
                     if let Some(player) = game.players.get(&owner_id) {
                         (player.ship.x, player.ship.y)
@@ -242,7 +240,6 @@ async fn game_update_loop() {
                 game.ball.grabbed = false;
                 game.ball.owner = None;
                 game.ball.shot_cooldown = 1.0;
-                // Clear the shoot flag for the owner.
                 if let Some(player) = game.players.get_mut(&owner_id) {
                     player.input.shoot = false;
                 }
