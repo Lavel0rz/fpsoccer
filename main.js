@@ -198,25 +198,50 @@ class MainScene extends Phaser.Scene {
   
   // Update ball using its history.
   updateBall(localTime) {
-    const renderTime = localTime - this.serverTimeOffset;
+    // Introduce a render delay of 100ms to have more snapshot data.
+    const renderDelay = 100;
+    const renderTime = localTime - this.serverTimeOffset - renderDelay;
+  
     if (this.ballHistory.length >= 2) {
-      const older = this.ballHistory[0];
-      const newer = this.ballHistory[this.ballHistory.length - 1];
-      const deltaT = newer.timestamp - older.timestamp;
-      if (renderTime <= newer.timestamp) {
-        const t = (renderTime - older.timestamp) / deltaT;
-        this.ball.x = Phaser.Math.Linear(older.x, newer.x, t);
-        this.ball.y = Phaser.Math.Linear(older.y, newer.y, t);
-      } else {
+      let older = null;
+      let newer = null;
+      
+      // Find two snapshots that bracket renderTime.
+      for (let i = 0; i < this.ballHistory.length - 1; i++) {
+        if (this.ballHistory[i].timestamp <= renderTime && this.ballHistory[i + 1].timestamp >= renderTime) {
+          older = this.ballHistory[i];
+          newer = this.ballHistory[i + 1];
+          break;
+        }
+      }
+      
+      let targetX, targetY;
+      
+      // If no exact bracket found, use the last two snapshots for extrapolation.
+      if (!older || !newer) {
+        older = this.ballHistory[this.ballHistory.length - 2];
+        newer = this.ballHistory[this.ballHistory.length - 1];
         let extraTime = renderTime - newer.timestamp;
-        extraTime = Math.min(extraTime, 100);
+        extraTime = Math.min(extraTime, 100); // Cap extrapolation time.
+        const deltaT = newer.timestamp - older.timestamp;
         const vx = (newer.x - older.x) / deltaT;
         const vy = (newer.y - older.y) / deltaT;
-        this.ball.x = newer.x + vx * extraTime;
-        this.ball.y = newer.y + vy * extraTime;
+        targetX = newer.x + vx * extraTime;
+        targetY = newer.y + vy * extraTime;
+      } else {
+        const deltaT = newer.timestamp - older.timestamp;
+        const t = (renderTime - older.timestamp) / deltaT;
+        targetX = Phaser.Math.Linear(older.x, newer.x, t);
+        targetY = Phaser.Math.Linear(older.y, newer.y, t);
       }
+      
+      // Apply a smoothing filter to transition from current to target position.
+      // Adjust the smoothing factor (0.1 here) to fine-tune responsiveness versus smoothness.
+      this.ball.x = Phaser.Math.Linear(this.ball.x, targetX, 0.1);
+      this.ball.y = Phaser.Math.Linear(this.ball.y, targetY, 0.1);
     }
   }
+  
   
   update(time, delta) {
     // Update your own ship.
