@@ -133,6 +133,7 @@ async fn game_update_loop() {
     loop {
         {
             let mut game = GLOBAL_GAME.lock().await;
+
             // --- Update players' ships ---
             for player in game.players.values_mut() {
                 let ship_speed = 100.0;
@@ -143,6 +144,66 @@ async fn game_update_loop() {
                 player.ship.x = player.ship.x.clamp(0.0, game_width);
                 player.ship.y = player.ship.y.clamp(0.0, game_height);
             }
+            
+            // --- Ship Collision Detection and Resolution ---
+            {
+                let collision_radius = 20.0;
+                let player_ids: Vec<u32> = game.players.keys().cloned().collect();
+                let mut adjustments: HashMap<u32, (f32, f32)> = HashMap::new();
+
+                for i in 0..player_ids.len() {
+                    for j in (i + 1)..player_ids.len() {
+                        let id_i = player_ids[i];
+                        let id_j = player_ids[j];
+                        let (xi, yi) = (game.players[&id_i].ship.x, game.players[&id_i].ship.y);
+                        let (xj, yj) = (game.players[&id_j].ship.x, game.players[&id_j].ship.y);
+                        let dx = xi - xj;
+                        let dy = yi - yj;
+                        let dist = (dx * dx + dy * dy).sqrt();
+
+                        // If ships are too close, resolve collision.
+                        if dist < collision_radius * 2.0 {
+                            let overlap = collision_radius * 2.0 - dist;
+                            let (nx, ny) = if dist > 0.0 { (dx / dist, dy / dist) } else { (1.0, 0.0) };
+                            let adjustment = (nx * overlap / 2.0, ny * overlap / 2.0);
+                            
+                            adjustments
+                                .entry(id_i)
+                                .and_modify(|e| { e.0 += adjustment.0; e.1 += adjustment.1; })
+                                .or_insert(adjustment);
+                            adjustments
+                                .entry(id_j)
+                                .and_modify(|e| { e.0 -= adjustment.0; e.1 -= adjustment.1; })
+                                .or_insert((-adjustment.0, -adjustment.1));
+
+                            // If one ship holds the ball and the other doesn't, drop the ball.
+                            if game.ball.grabbed {
+                                if let Some(owner_id) = game.ball.owner {
+                                    if owner_id == id_i || owner_id == id_j {
+                                        // Capture the owner's current ship position into temporary variables.
+                                        let owner_pos = game.players.get(&owner_id).map(|owner| (owner.ship.x, owner.ship.y));
+                                        if let Some((x, y)) = owner_pos {
+                                            game.ball.x = x;
+                                            game.ball.y = y;
+                                        }
+                                        game.ball.grabbed = false;
+                                        game.ball.owner = None;
+                                        game.ball.shot_cooldown = 1.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Apply the computed adjustments to each player's position.
+                for (id, (dx, dy)) in adjustments {
+                    if let Some(player) = game.players.get_mut(&id) {
+                        player.ship.x += dx;
+                        player.ship.y += dy;
+                    }
+                }
+            }
+            
             // --- Update ball physics ---
             if game.ball.shot_cooldown > 0.0 {
                 game.ball.shot_cooldown -= fixed_dt;
@@ -165,6 +226,7 @@ async fn game_update_loop() {
                     game.ball.y = game.ball.y.clamp(0.0, game_height);
                 }
             }
+            
             // --- Process ball grabbing ---
             {
                 // Remove velocity check: a ship grabs the ball if within 40 pixels and cooldown is 0.
@@ -194,6 +256,7 @@ async fn game_update_loop() {
                     }
                 }
             }
+            
             // --- Process shooting ---
             // Only allow shooting if the ball is grabbed and the owner presses shoot.
             let shoot_update = if game.ball.grabbed {
@@ -244,6 +307,7 @@ async fn game_update_loop() {
                     player.input.shoot = false;
                 }
             }
+            
             // --- Build snapshot with server timestamp ---
             let now = Utc::now().timestamp_millis() as u64;
             let mut players_snapshot = HashMap::new();

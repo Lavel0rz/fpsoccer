@@ -94,7 +94,9 @@ class MainScene extends Phaser.Scene {
         target_x: targetX !== undefined ? targetX : null,
         target_y: targetY !== undefined ? targetY : null
       };
-      this.socket.send(JSON.stringify(input));
+      setTimeout(() => {
+        this.socket.send(JSON.stringify(input));
+      }, 100); // 100ms delay before sending the input
       this.inputSequence++;
     }
   }
