@@ -262,7 +262,7 @@ class MainScene extends Phaser.Scene {
     // Draw gravity circle.
     this.gravityCircle.clear();
     this.gravityCircle.lineStyle(2, 0xff0000, 1);
-    this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 40);
+    this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 20);
     
     // Update remote ships.
     this.updateRemoteShips(time);

@@ -53,6 +53,7 @@ struct Player {
     ship: Ship,
     input: InputState,
     last_seq: u32,
+    velocity: (f32, f32), // Added velocity for acceleration
 }
 
 #[derive(Debug, Serialize)]
@@ -134,13 +135,42 @@ async fn game_update_loop() {
         {
             let mut game = GLOBAL_GAME.lock().await;
 
-            // --- Update players' ships ---
+            // --- Update players' ships with acceleration ---
             for player in game.players.values_mut() {
-                let ship_speed = 100.0;
-                if player.input.left { player.ship.x -= ship_speed * fixed_dt; }
-                if player.input.right { player.ship.x += ship_speed * fixed_dt; }
-                if player.input.up { player.ship.y -= ship_speed * fixed_dt; }
-                if player.input.down { player.ship.y += ship_speed * fixed_dt; }
+                // Acceleration settings (in pixels per second²)
+                let acceleration = 200.0;
+                let max_speed = 100.0;
+
+                // Determine acceleration vector based on input
+                let mut ax = 0.0;
+                let mut ay = 0.0;
+                if player.input.left { ax -= acceleration; }
+                if player.input.right { ax += acceleration; }
+                if player.input.up { ay -= acceleration; }
+                if player.input.down { ay += acceleration; }
+
+                // Update velocity based on acceleration
+                player.velocity.0 += ax * fixed_dt;
+                player.velocity.1 += ay * fixed_dt;
+
+                // Apply some friction to gradually slow the ship when no input is pressed
+                let friction = 0.8;
+                player.velocity.0 *= friction;
+                player.velocity.1 *= friction;
+
+                // Clamp the speed to the maximum speed
+                let speed = (player.velocity.0.powi(2) + player.velocity.1.powi(2)).sqrt();
+                if speed > max_speed {
+                    let scale = max_speed / speed;
+                    player.velocity.0 *= scale;
+                    player.velocity.1 *= scale;
+                }
+
+                // Update ship position based on velocity
+                player.ship.x += player.velocity.0 * fixed_dt;
+                player.ship.y += player.velocity.1 * fixed_dt;
+
+                // Clamp ship position within game boundaries.
                 player.ship.x = player.ship.x.clamp(0.0, game_width);
                 player.ship.y = player.ship.y.clamp(0.0, game_height);
             }
@@ -180,7 +210,7 @@ async fn game_update_loop() {
                             if game.ball.grabbed {
                                 if let Some(owner_id) = game.ball.owner {
                                     if owner_id == id_i || owner_id == id_j {
-                                        // Capture the owner's current ship position into temporary variables.
+                                        // Drop the ball at the owner's current position.
                                         let owner_pos = game.players.get(&owner_id).map(|owner| (owner.ship.x, owner.ship.y));
                                         if let Some((x, y)) = owner_pos {
                                             game.ball.x = x;
@@ -229,7 +259,7 @@ async fn game_update_loop() {
             
             // --- Process ball grabbing ---
             {
-                // Remove velocity check: a ship grabs the ball if within 40 pixels and cooldown is 0.
+                // A ship grabs the ball if within 40 pixels and cooldown is 0.
                 if !game.ball.grabbed && game.ball.shot_cooldown == 0.0 {
                     let mut closest_id: Option<u32> = None;
                     let mut closest_dist2: f32 = f32::MAX;
@@ -239,7 +269,7 @@ async fn game_update_loop() {
                         let dx = player.ship.x - game.ball.x;
                         let dy = player.ship.y - game.ball.y;
                         let dist2 = dx * dx + dy * dy;
-                        if dist2 < (40.0 * 40.0) && dist2 < closest_dist2 {
+                        if dist2 < (20.0 * 20.0) && dist2 < closest_dist2 {
                             closest_dist2 = dist2;
                             closest_id = Some(player.id);
                             new_x = player.ship.x;
@@ -342,6 +372,7 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
             ship: Ship { x: 400.0, y: 300.0 },
             input: InputState::default(),
             last_seq: 0,
+            velocity: (0.0, 0.0),
         });
         game_lock.clients.insert(id, Arc::clone(&tx));
         id
