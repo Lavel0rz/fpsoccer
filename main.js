@@ -19,6 +19,10 @@ class MainScene extends Phaser.Scene {
     this.playerId = null; // Assigned by server.
     // Offset to align server timestamp with local time.
     this.serverTimeOffset = 0; 
+
+    // New: Boost meter display objects.
+    this.boostText = null;
+    this.boostBar = null;
   }
   
   preload() {
@@ -33,6 +37,10 @@ class MainScene extends Phaser.Scene {
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.5).setOrigin(0.5, 0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
+    // New: Create boost meter display.
+    this.boostText = this.add.text(10, 10, "Boost: 200", { font: "16px Arial", fill: "#ffffff" });
+    this.boostBar = this.add.graphics();
+    
     this.connectWebSocket();
   
     // Keyboard input.
@@ -122,7 +130,6 @@ class MainScene extends Phaser.Scene {
         }
         // Server timestamp in ms.
         const serverTimestamp = state.time;
-        // Set offset on first snapshot.
         if (!this.serverTimeOffset && serverTimestamp) {
           this.serverTimeOffset = this.time.now - serverTimestamp;
         }
@@ -131,6 +138,8 @@ class MainScene extends Phaser.Scene {
         if (state.players) {
           if (state.players[this.playerId]) {
             this.serverState.ship = state.players[this.playerId];
+            // Also store boost (for display)
+            this.serverState.boost = state.players[this.playerId].boost;
           }
           for (const id in state.players) {
             if (parseInt(id) === this.playerId) continue;
@@ -177,7 +186,6 @@ class MainScene extends Phaser.Scene {
     });
   }
   
-  // Update remote ships using history for interpolation/extrapolation.
   updateRemoteShips(localTime) {
     const renderTime = localTime - this.serverTimeOffset;
     for (const id in this.otherShips) {
@@ -201,7 +209,6 @@ class MainScene extends Phaser.Scene {
     }
   }
   
-  // Update ball using its history.
   updateBall(localTime) {
     const renderDelay = 100;
     const renderTime = localTime - this.serverTimeOffset - renderDelay;
@@ -249,15 +256,28 @@ class MainScene extends Phaser.Scene {
     if (this.inputState.right) { this.predictedState.x += shipSpeed * dt; }
     if (this.inputState.up) { this.predictedState.y -= shipSpeed * dt; }
     if (this.inputState.down) { this.predictedState.y += shipSpeed * dt; }
-    const alpha = 0.075;
-    this.predictedState.x = Phaser.Math.Linear(this.predictedState.x, this.serverState.ship.x, alpha);
-    this.predictedState.y = Phaser.Math.Linear(this.predictedState.y, this.serverState.ship.y, alpha);
+    const alpha = 0.065;
+    this.predictedState.x = Phaser.Math.Linear(this.predictedState.x, this.serverState.ship ? this.serverState.ship.x : this.predictedState.x, alpha);
+    this.predictedState.y = Phaser.Math.Linear(this.predictedState.y, this.serverState.ship ? this.serverState.ship.y : this.predictedState.y, alpha);
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
     
     this.gravityCircle.clear();
     this.gravityCircle.lineStyle(2, 0xff0000, 1);
     this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 15);
+    
+    // Update boost meter display using the boost value from the server state.
+    if (this.serverState.boost !== undefined) {
+      this.boostText.setText("Boost: " + Math.round(this.serverState.boost));
+      this.boostBar.clear();
+      // Draw background bar.
+      this.boostBar.fillStyle(0x666666, 1);
+      this.boostBar.fillRect(10, 30, 200, 10);
+      // Draw current boost level.
+      this.boostBar.fillStyle(0x00ff00, 1);
+      let boostWidth = (this.serverState.boost / 200) * 200;
+      this.boostBar.fillRect(10, 30, boostWidth, 10);
+    }
     
     this.updateRemoteShips(time);
     

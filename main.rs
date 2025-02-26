@@ -183,7 +183,7 @@ async fn game_update_loop() {
                 // Drain boost if active.
                 if player.input.boost && player.boost > 0.0 {
                     // Consume 20 units per second.
-                    player.boost -= 20.0 * fixed_dt;
+                    player.boost -= 40.0 * fixed_dt;
                     if player.boost < 0.0 { player.boost = 0.0; }
                 }
 
