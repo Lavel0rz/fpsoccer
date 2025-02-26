@@ -125,8 +125,8 @@ async fn main() {
         });
     let routes = ws_route.with(warp::cors().allow_any_origin());
     
-    println!("WebSocket server listening on ws://localhost:8080/ws");
-    warp::serve(routes).run(([127, 0, 0, 1], 8080)).await;
+    println!("WebSocket server listening on ws://0.0.0.0:8080/ws");
+    warp::serve(routes).run(([0, 0, 0, 0], 8080)).await;
 }
 
 fn with_game(game: Arc<Mutex<Game>>) -> impl warp::Filter<Extract = (Arc<Mutex<Game>>,), Error = std::convert::Infallible> + Clone {
@@ -168,13 +168,11 @@ async fn game_update_loop() {
                 }
             }
 
-            // Extract ball state.
+            // --- Update players' ships with acceleration ---
+            // Extract ball fields to avoid mutable borrow conflict.
             let ball_grabbed = game.ball.grabbed;
             let ball_owner = game.ball.owner;
-
-            // --- Update players' ships with acceleration ---
             for player in game.players.values_mut() {
-                // If the ship is holding the ball, move 10% slower.
                 let slowdown = if ball_grabbed && ball_owner == Some(player.id) { 0.9 } else { 1.0 };
 
                 // Boost multiplier: if boost is active and there is boost meter available,
@@ -182,7 +180,6 @@ async fn game_update_loop() {
                 let boost_multiplier = if player.input.boost && player.boost > 0.0 { 2.0 } else { 1.0 };
                 // Drain boost if active.
                 if player.input.boost && player.boost > 0.0 {
-                    // Consume 20 units per second.
                     player.boost -= 40.0 * fixed_dt;
                     if player.boost < 0.0 { player.boost = 0.0; }
                 }
@@ -190,12 +187,18 @@ async fn game_update_loop() {
                 let acceleration = 200.0 * slowdown * boost_multiplier;
                 let max_speed = 100.0 * slowdown * boost_multiplier;
 
-                let mut ax = 0.0;
-                let mut ay = 0.0;
+                // Since input is boolean (for direction), we compute acceleration accordingly.
+                let mut ax: f32 = 0.0;
+                let mut ay: f32 = 0.0;
                 if player.input.left { ax -= acceleration; }
                 if player.input.right { ax += acceleration; }
                 if player.input.up { ay -= acceleration; }
                 if player.input.down { ay += acceleration; }
+
+                // (Optional) Log if acceleration values are suspiciously high.
+                if ax.abs() > acceleration * 1.5 || ay.abs() > acceleration * 1.5 {
+                    eprintln!("Suspicious acceleration from player {}: ax={}, ay={}", player.id, ax, ay);
+                }
 
                 player.velocity.0 += ax * fixed_dt;
                 player.velocity.1 += ay * fixed_dt;
@@ -292,9 +295,16 @@ async fn game_update_loop() {
                     let mut closest_dist2: f32 = f32::MAX;
                     let mut new_x = 0.0;
                     let mut new_y = 0.0;
+                    // Extract ball fields into locals.
+                    let ball_grabbed = game.ball.grabbed;
+                    let ball_owner = game.ball.owner;
+                    let current_ball_x = game.ball.x;
+                    let current_ball_y = game.ball.y;
+                    
                     for player in game.players.values() {
-                        let dx = player.ship.x - game.ball.x;
-                        let dy = player.ship.y - game.ball.y;
+                        let _slowdown = if ball_grabbed && ball_owner == Some(player.id) { 0.9 } else { 1.0 };
+                        let dx = player.ship.x - current_ball_x;
+                        let dy = player.ship.y - current_ball_y;
                         let dist2 = dx * dx + dy * dy;
                         if dist2 < (20.0 * 20.0) && dist2 < closest_dist2 {
                             closest_dist2 = dist2;
@@ -317,7 +327,6 @@ async fn game_update_loop() {
             // --- Process shooting using a physics-based impulse approach ---
             if game.ball.grabbed {
                 if let Some(owner_id) = game.ball.owner {
-                    // Use an immutable borrow to check if the player is ready to shoot.
                     if let Some(player) = game.players.get(&owner_id) {
                         if player.input.shoot && player.shoot_cooldown <= 0.0 {
                             // Clamp target_x/target_y within game boundaries.
@@ -344,37 +353,31 @@ async fn game_update_loop() {
                                 mag = max_allowed;
                             }
                             
+                            // Log if the impulse is suspiciously high.
+                            if mag > max_allowed * 0.9 {
+                                eprintln!("Player {} shooting with near-max impulse: mag={}", owner_id, mag);
+                            }
+                            
                             // Physics parameters.
-                            let ship_mass = 1.0;      // arbitrary units
-                            let ball_mass = 0.5;      // arbitrary units
-                            let base_shot_force = 1400.0; // base force magnitude
-                            let dt = fixed_dt;        // time step (0.1 sec)
+                            let ship_mass = 1.0;
+                            let ball_mass = 0.5;
+                            let base_shot_force = 1400.0;
+                            let dt = fixed_dt;
                             
-                            // Compute normalized aim direction.
                             let aim_norm = (dx / mag, dy / mag);
-                            
-                            // Base impulse from shot force.
                             let impulse_base = (aim_norm.0 * base_shot_force * dt, aim_norm.1 * base_shot_force * dt);
-                            
-                            // Additional impulse from ship's current velocity.
                             let additional_impulse = (player.velocity.0 * dt, player.velocity.1 * dt);
-                            
-                            // Total impulse.
                             let total_impulse = (impulse_base.0 + additional_impulse.0, impulse_base.1 + additional_impulse.1);
                             
-                            // Copy needed ship data before releasing the immutable borrow.
                             let (ship_x, ship_y) = (player.ship.x, player.ship.y);
                             
-                            // Now update ball state.
                             game.ball.vx = total_impulse.0 / ball_mass;
                             game.ball.vy = total_impulse.1 / ball_mass;
                             game.ball.x = ship_x;
                             game.ball.y = ship_y;
                             
-                            // Set a grab cooldown to prevent immediate regrab.
                             game.ball.grab_cooldown = 0.5;
                             
-                            // Now obtain a mutable borrow to update the player's state.
                             if let Some(player_mut) = game.players.get_mut(&owner_id) {
                                 let recoil_factor = 1.0;
                                 player_mut.velocity.0 -= (total_impulse.0 / ship_mass) * recoil_factor;
@@ -383,7 +386,6 @@ async fn game_update_loop() {
                                 player_mut.input.shoot = false;
                             }
                             
-                            // Finally, update ball grabbed state.
                             game.ball.grabbed = false;
                             game.ball.owner = None;
                         }
@@ -407,7 +409,6 @@ async fn game_update_loop() {
                 players: players_snapshot,
                 ball: game.ball.clone(),
             });
-            // --- Broadcast snapshot ---
             for (_id, sender) in game.clients.iter_mut() {
                 let _ = sender.lock().await.send(Message::text(snapshot.to_string())).await;
             }
@@ -420,7 +421,6 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
     let (tx, mut rx) = ws.split();
     let tx = Arc::new(Mutex::new(tx));
 
-    // Register new player.
     let player_id = {
         let mut game_lock = game.lock().await;
         let id = game_lock.next_id;
@@ -432,7 +432,7 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
             last_seq: 0,
             velocity: (0.0, 0.0),
             shoot_cooldown: 0.0,
-            boost: 200.0, // New player starts with full boost.
+            boost: 200.0,
         });
         game_lock.clients.insert(id, Arc::clone(&tx));
         id
@@ -440,13 +440,11 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
 
     println!("New player connected: {}", player_id);
 
-    // Send initial message with player id.
     {
         let init_msg = json!({ "your_id": player_id });
         let _ = tx.lock().await.send(Message::text(init_msg.to_string())).await;
     }
 
-    // Process incoming messages.
     while let Some(result) = rx.next().await {
         match result {
             Ok(msg) => {
@@ -486,10 +484,8 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
         }
     }
 
-    // Clean up on disconnect.
     let mut game_lock = game.lock().await;
     game_lock.players.remove(&player_id);
     game_lock.clients.remove(&player_id);
     println!("Player {} disconnected.", player_id);
 }
-
