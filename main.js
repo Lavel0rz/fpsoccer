@@ -1,28 +1,30 @@
 class MainScene extends Phaser.Scene {
   constructor() {
     super({ key: 'MainScene' });
-    // Your own ship and prediction state.
+    // Ship and state.
     this.ship = null;
     this.predictedState = { x: 400, y: 300 };
     this.serverState = { ship: { x: 400, y: 300, seq: 0 } };
-    // Dictionary for other players' ships.
-    // Each remote ship sprite will have a history array added to it.
     this.otherShips = {}; 
     this.socket = null;
     this.ball = null;
     this.latestBallState = null;
-    // Buffer for ball snapshots.
     this.ballHistory = [];
-    // Input state now includes boost.
+    // Input state.
     this.inputState = { left: false, right: false, up: false, down: false, shoot: false, boost: false };
     this.inputSequence = 0;
-    this.playerId = null; // Assigned by server.
-    // Offset to align server timestamp with local time.
-    this.serverTimeOffset = 0; 
-
-    // New: Boost meter display objects.
+    this.playerId = null;
+    this.serverTimeOffset = 0;
+    // For continuous aiming.
+    this.aimTarget = { x: 400, y: 300 };
+    // Boost display.
     this.boostText = null;
     this.boostBar = null;
+    // For shot effect.
+    this.shotEffectDuration = 200;
+    this.shotCorrection = { x: 0, y: 0 };
+    // Minimum distance from ship to consider for a valid shot vector.
+    this.minDist = 20;
   }
   
   preload() {
@@ -31,80 +33,80 @@ class MainScene extends Phaser.Scene {
   }
   
   create() {
-    // Create your own ship.
-    this.ship = this.add.sprite(400, 300, 'ship').setScale(0.5).setOrigin(0.5, 0.5);
-    // Create ball sprite.
-
-    this.cameras.main.startFollow(this.ship);
-    this.cameras.main.setBounds(0, 0, 2000, 1200);
-
-    this.minimap = this.cameras.add(1300, 10, 200, 150)
-      .setZoom(200 / 2000)  // This equals 0.1
-      .setName('minimap');
-    this.minimap.setBounds(0, 0, 2000, 1200);
-    
-    // Optionally set a background color for the minimap.
-    this.minimap.setBackgroundColor(0x002244);
-    
-    this.ball = this.add.sprite(400, 400, 'ball').setScale(0.5).setOrigin(0.5, 0.5);
+    // Create ship and ball.
+    this.ship = this.add.sprite(400, 300, 'ship').setScale(0.5).setOrigin(0.5);
+    this.ball = this.add.sprite(400, 400, 'ball').setScale(0.5).setOrigin(0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
-    // New: Create boost meter display.
+    
+    // Create boost meter.
     this.boostText = this.add.text(10, 10, "Boost: 200", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
     this.boostBar = this.add.graphics().setScrollFactor(0);
+    
+    // Minimap.
+    this.minimap = this.cameras.add(1300, 10, 200, 150).setZoom(200 / 2000).setName('minimap');
+    this.minimap.setBounds(0, 0, 2000, 1200);
+    this.minimap.setBackgroundColor(0x002244);
     this.minimap.ignore([this.boostText, this.boostBar]);
+    
+    // Follow ship.
+    this.cameras.main.startFollow(this.ship);
+    this.cameras.main.setBounds(0, 0, 2000, 1200);
+    
     this.connectWebSocket();
-  
+    
     // Keyboard input.
-    // Use WASD for movement and Shift for boost.
     this.input.keyboard.on('keydown', (event) => {
       const key = event.key.toLowerCase();
       if (["w", "a", "s", "d", "shift"].includes(key)) {
-        this.updateInputState(event.key, true);
+        this.updateInputState(key, true);
       }
     });
     this.input.keyboard.on('keyup', (event) => {
       const key = event.key.toLowerCase();
       if (["w", "a", "s", "d", "shift"].includes(key)) {
-        this.updateInputState(event.key, false);
+        this.updateInputState(key, false);
       }
     });
-  
-    // Mouse input for shooting.
+    
+    // Mouse input.
     this.input.on('pointerdown', (pointer) => {
       if (pointer.leftButtonDown()) {
         this.inputState.shoot = true;
-        this.sendInput(pointer.worldX, pointer.worldY);
+        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        // Update aim target and send input.
+        this.aimTarget.x = worldPoint.x;
+        this.aimTarget.y = worldPoint.y;
+        this.sendInput();
       }
     });
     this.input.on('pointerup', () => {
       this.inputState.shoot = false;
       this.sendInput();
     });
+    // Update aim target continuously.
+    this.input.on('pointermove', (pointer) => {
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+      this.aimTarget.x = worldPoint.x;
+      this.aimTarget.y = worldPoint.y;
+      // If left button is held, also send the new aim target.
+      if (pointer.leftButtonDown()) {
+        this.sendInput();
+      }
+    });
   }
   
   updateInputState(key, isDown) {
-    // Normalize key to lowercase.
-    key = key.toLowerCase();
-    if (key === 'w') {
-      this.inputState.up = isDown;
-    }
-    if (key === 's') {
-      this.inputState.down = isDown;
-    }
-    if (key === 'a') {
-      this.inputState.left = isDown;
-    }
-    if (key === 'd') {
-      this.inputState.right = isDown;
-    }
-    if (key === 'shift') {
-      this.inputState.boost = isDown;
-    }
+    if (key === 'w') this.inputState.up = isDown;
+    if (key === 's') this.inputState.down = isDown;
+    if (key === 'a') this.inputState.left = isDown;
+    if (key === 'd') this.inputState.right = isDown;
+    if (key === 'shift') this.inputState.boost = isDown;
     this.sendInput();
   }
   
-  sendInput(targetX, targetY) {
+  // Always include the latest aimTarget in the sent input.
+  sendInput() {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       const input = {
         seq: this.inputSequence,
@@ -114,50 +116,43 @@ class MainScene extends Phaser.Scene {
         down: this.inputState.down,
         shoot: this.inputState.shoot,
         boost: this.inputState.boost,
-        target_x: targetX !== undefined ? targetX : null,
-        target_y: targetY !== undefined ? targetY : null
+        target_x: this.aimTarget.x,
+        target_y: this.aimTarget.y
       };
-      setTimeout(() => {
-        this.socket.send(JSON.stringify(input));
-      }, 100); // 100ms delay before sending the input
+      this.socket.send(JSON.stringify(input));
       this.inputSequence++;
     }
   }
   
   connectWebSocket() {
     this.socket = new WebSocket('ws://localhost:8080/ws');
-  
     this.socket.addEventListener('open', () => {
       console.log('WebSocket connection opened.');
     });
-  
     this.socket.addEventListener('message', (event) => {
       try {
         const state = JSON.parse(event.data);
-        // Assign your player ID.
         if (state.your_id !== undefined && this.playerId === null) {
           this.playerId = state.your_id;
           console.log('Assigned player id:', this.playerId);
           return;
         }
-        // Server timestamp in ms.
         const serverTimestamp = state.time;
         if (!this.serverTimeOffset && serverTimestamp) {
           this.serverTimeOffset = this.time.now - serverTimestamp;
         }
-  
-        // Update players.
         if (state.players) {
           if (state.players[this.playerId]) {
             this.serverState.ship = state.players[this.playerId];
-            // Also store boost (for display)
             this.serverState.boost = state.players[this.playerId].boost;
           }
           for (const id in state.players) {
             if (parseInt(id) === this.playerId) continue;
             const shipState = state.players[id];
             if (!this.otherShips[id]) {
-              const sprite = this.add.sprite(shipState.x, shipState.y, 'ship').setScale(0.5).setOrigin(0.5, 0.5);
+              const sprite = this.add.sprite(shipState.x, shipState.y, 'ship')
+                .setScale(0.5)
+                .setOrigin(0.5);
               sprite.history = [{ x: shipState.x, y: shipState.y, timestamp: serverTimestamp }];
               this.otherShips[id] = sprite;
             } else {
@@ -188,11 +183,9 @@ class MainScene extends Phaser.Scene {
         console.error('Failed to parse server message:', e);
       }
     });
-  
     this.socket.addEventListener('close', () => {
       console.log('WebSocket connection closed.');
     });
-  
     this.socket.addEventListener('error', (error) => {
       console.error('WebSocket error:', error);
     });
@@ -224,11 +217,9 @@ class MainScene extends Phaser.Scene {
   updateBall(localTime) {
     const renderDelay = 100;
     const renderTime = localTime - this.serverTimeOffset - renderDelay;
-  
     if (this.ballHistory.length >= 2) {
       let older = null;
       let newer = null;
-      
       for (let i = 0; i < this.ballHistory.length - 1; i++) {
         if (this.ballHistory[i].timestamp <= renderTime && this.ballHistory[i + 1].timestamp >= renderTime) {
           older = this.ballHistory[i];
@@ -236,9 +227,7 @@ class MainScene extends Phaser.Scene {
           break;
         }
       }
-      
       let targetX, targetY;
-      
       if (!older || !newer) {
         older = this.ballHistory[this.ballHistory.length - 2];
         newer = this.ballHistory[this.ballHistory.length - 1];
@@ -255,7 +244,6 @@ class MainScene extends Phaser.Scene {
         targetX = Phaser.Math.Linear(older.x, newer.x, t);
         targetY = Phaser.Math.Linear(older.y, newer.y, t);
       }
-      
       this.ball.x = Phaser.Math.Linear(this.ball.x, targetX, 0.1);
       this.ball.y = Phaser.Math.Linear(this.ball.y, targetY, 0.1);
     }
@@ -264,6 +252,7 @@ class MainScene extends Phaser.Scene {
   update(time, delta) {
     const dt = delta / 1000;
     const shipSpeed = 100;
+    // Update predicted state.
     if (this.inputState.left) { this.predictedState.x -= shipSpeed * dt; }
     if (this.inputState.right) { this.predictedState.x += shipSpeed * dt; }
     if (this.inputState.up) { this.predictedState.y -= shipSpeed * dt; }
@@ -278,14 +267,11 @@ class MainScene extends Phaser.Scene {
     this.gravityCircle.lineStyle(2, 0xff0000, 1);
     this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 15);
     
-    // Update boost meter display using the boost value from the server state.
     if (this.serverState.boost !== undefined) {
       this.boostText.setText("Boost: " + Math.round(this.serverState.boost));
       this.boostBar.clear();
-      // Draw background bar.
       this.boostBar.fillStyle(0x666666, 1);
       this.boostBar.fillRect(10, 30, 200, 10);
-      // Draw current boost level.
       this.boostBar.fillStyle(0x00ff00, 1);
       let boostWidth = (this.serverState.boost / 200) * 200;
       this.boostBar.fillRect(10, 30, boostWidth, 10);
@@ -293,22 +279,53 @@ class MainScene extends Phaser.Scene {
     
     this.updateRemoteShips(time);
     
+    // Handle ball rendering.
     if (this.latestBallState && this.latestBallState.grabbed) {
-      let targetX, targetY;
       if (this.latestBallState.owner === this.playerId) {
-        targetX = this.ship.x;
-        targetY = this.ship.y;
-      } else if (this.otherShips[this.latestBallState.owner]) {
-        targetX = this.otherShips[this.latestBallState.owner].x;
-        targetY = this.otherShips[this.latestBallState.owner].y;
+        // If you own the ball, attach it to your ship.
+        this.ball.x = this.ship.x;
+        this.ball.y = this.ship.y;
+        this.ball.setDepth(1);
+        this.ball.setVisible(true);
       } else {
-        targetX = this.latestBallState.x;
-        targetY = this.latestBallState.y;
+        // If another client grabbed it, follow their ship.
+        const grabbingSprite = this.otherShips[this.latestBallState.owner];
+        if (grabbingSprite) {
+          this.ball.x = grabbingSprite.x;
+          this.ball.y = grabbingSprite.y;
+          this.ball.setDepth(1);
+          this.ball.setVisible(true);
+        } else if (this.ballHistory.length > 0) {
+          this.updateBall(time);
+          this.ball.setDepth(0);
+          this.ball.setVisible(true);
+        } else {
+          this.ball.setVisible(false);
+        }
       }
-      this.ball.x = targetX;
-      this.ball.y = targetY;
+    } else if (this.recentShot) {
+      // Render shot effect.
+      const pointer = this.input.activePointer;
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+      let dx = worldPoint.x - this.ship.x;
+      let dy = worldPoint.y - this.ship.y;
+      let mag = Math.sqrt(dx * dx + dy * dy);
+      if (mag < this.minDist) {
+        const angle = Phaser.Math.Angle.Between(this.ship.x, this.ship.y, worldPoint.x, worldPoint.y);
+        dx = Math.cos(angle) * this.minDist;
+        dy = Math.sin(angle) * this.minDist;
+        mag = this.minDist;
+      }
+      const offset = 25;
+      const offsetX = this.ship.x + (dx / mag) * (offset + this.shotCorrection.x);
+      const offsetY = this.ship.y + (dy / mag) * (offset + this.shotCorrection.y);
+      this.ball.x = offsetX;
+      this.ball.y = offsetY;
       this.ball.setDepth(1);
       this.ball.setVisible(true);
+      if (time - this.shotTime > this.shotEffectDuration) {
+        this.recentShot = false;
+      }
     } else if (this.ballHistory.length > 0) {
       this.updateBall(time);
       this.ball.setDepth(0);

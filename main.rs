@@ -18,7 +18,7 @@ struct InputState {
     up: bool,
     down: bool,
     shoot: bool,
-    boost: bool, // New field: true if boost (shift) is held.
+    boost: bool, // true if boost (shift) is held.
     target_x: Option<f32>,
     target_y: Option<f32>,
 }
@@ -45,7 +45,7 @@ struct Ball {
     vy: f32,
     active: bool,
     grabbed: bool,
-    // Renamed from shot_cooldown to grab_cooldown to indicate its use for ball grabbing collisions.
+    // grab_cooldown is used to prevent immediate re-grabs after shooting or collisions.
     grab_cooldown: f32,
     owner: Option<u32>,
 }
@@ -178,7 +178,7 @@ async fn game_update_loop() {
                 let slowdown = if ball_grabbed && ball_owner == Some(player.id) { 0.9 } else { 1.0 };
 
                 // Boost multiplier: if boost is active and there is boost meter available,
-                // apply extra acceleration. For example, multiplier 2.0.
+                // apply extra acceleration.
                 let boost_multiplier = if player.input.boost && player.boost > 0.0 { 2.0 } else { 1.0 };
                 // Drain boost if active.
                 if player.input.boost && player.boost > 0.0 {
@@ -314,67 +314,69 @@ async fn game_update_loop() {
                 }
             }
             
-            // --- Process shooting ---
-            let shoot_update = if game.ball.grabbed {
+            // --- Process shooting using a physics-based impulse approach ---
+            if game.ball.grabbed {
                 if let Some(owner_id) = game.ball.owner {
+                    // Use an immutable borrow to check if the player is ready to shoot.
                     if let Some(player) = game.players.get(&owner_id) {
-                        // Only allow shooting if the player's shoot cooldown is 0.
                         if player.input.shoot && player.shoot_cooldown <= 0.0 {
                             let target_x = player.input.target_x.unwrap_or(player.ship.x);
                             let target_y = player.input.target_y.unwrap_or(player.ship.y);
                             let mut dx = target_x - player.ship.x;
                             let mut dy = target_y - player.ship.y;
                             let mut mag = (dx * dx + dy * dy).sqrt();
-                            let ball_speed = 300.0;
                             if mag <= 0.0 {
                                 dx = 0.0;
                                 dy = -1.0;
                                 mag = 1.0;
                             }
-                            // Adjust aim based on ship velocity.
-                            let inaccuracy = 0.3;
-                            let vel_mag = (player.velocity.0.powi(2) + player.velocity.1.powi(2)).sqrt();
-                            if vel_mag > 0.0 {
-                                let aim_norm = (dx / mag, dy / mag);
-                                let vel_norm = (player.velocity.0 / vel_mag, player.velocity.1 / vel_mag);
-                                let alignment = aim_norm.0 * vel_norm.0 + aim_norm.1 * vel_norm.1;
-                                let error_factor = 1.0 - alignment.max(0.0);
-                                dx += player.velocity.0 * inaccuracy * error_factor;
-                                dy += player.velocity.1 * inaccuracy * error_factor;
-                                mag = (dx * dx + dy * dy).sqrt();
+                            
+                            // Physics parameters.
+                            let ship_mass = 1.0;      // arbitrary units
+                            let ball_mass = 0.5;      // arbitrary units
+                            let base_shot_force = 1400.0; // base force magnitude
+                            let dt = fixed_dt;        // time step (0.1 sec)
+                            
+                            // Compute normalized aim direction.
+                            let aim_norm = (dx / mag, dy / mag);
+                            
+                            // Base impulse from shot force.
+                            let impulse_base = (aim_norm.0 * base_shot_force * dt, aim_norm.1 * base_shot_force * dt);
+                            
+                            // Additional impulse from ship's current velocity.
+                            let additional_impulse = (player.velocity.0 * dt, player.velocity.1 * dt);
+                            
+                            // Total impulse.
+                            let total_impulse = (impulse_base.0 + additional_impulse.0, impulse_base.1 + additional_impulse.1);
+                            
+                            // Copy needed ship data before releasing the immutable borrow.
+                            let (ship_x, ship_y) = (player.ship.x, player.ship.y);
+                            
+                            // Now update ball state.
+                            game.ball.vx = total_impulse.0 / ball_mass;
+                            game.ball.vy = total_impulse.1 / ball_mass;
+                            game.ball.x = ship_x;
+                            game.ball.y = ship_y;
+                            
+                            // Set a grab cooldown to prevent immediate regrab.
+                            game.ball.grab_cooldown = 0.5;
+                            
+                            // Now obtain a mutable borrow to update the player's state.
+                            {
+                                if let Some(player_mut) = game.players.get_mut(&owner_id) {
+                                    let recoil_factor = 1.0;
+                                    player_mut.velocity.0 -= (total_impulse.0 / ship_mass) * recoil_factor;
+                                    player_mut.velocity.1 -= (total_impulse.1 / ship_mass) * recoil_factor;
+                                    player_mut.shoot_cooldown = 0.25;
+                                    player_mut.input.shoot = false;
+                                }
                             }
-                            Some((dx, dy, mag, ball_speed, owner_id))
-                        } else {
-                            None
+                            
+                            // Finally, update ball grabbed state.
+                            game.ball.grabbed = false;
+                            game.ball.owner = None;
                         }
-                    } else {
-                        None
                     }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if let Some((dx, dy, mag, ball_speed, owner_id)) = shoot_update {
-                game.ball.vx = dx / mag * ball_speed;
-                game.ball.vy = dy / mag * ball_speed;
-                let new_pos = if let Some(player) = game.players.get(&owner_id) {
-                    (player.ship.x, player.ship.y)
-                } else {
-                    (game.ball.x, game.ball.y)
-                };
-                game.ball.x = new_pos.0;
-                game.ball.y = new_pos.1;
-                game.ball.grabbed = false;
-                game.ball.owner = None;
-                // Set shoot cooldown for the shooter only.
-                if let Some(player) = game.players.get_mut(&owner_id) {
-                    let recoil_factor = 2.0; // Increased recoil for stronger pushback.
-                    player.velocity.0 -= (dx / mag) * recoil_factor;
-                    player.velocity.1 -= (dy / mag) * recoil_factor;
-                    player.shoot_cooldown = 0.25;
-                    player.input.shoot = false;
                 }
             }
             
@@ -386,7 +388,7 @@ async fn game_update_loop() {
                     x: player.ship.x,
                     y: player.ship.y,
                     seq: player.last_seq,
-                    boost: player.boost, // Include boost meter for display.
+                    boost: player.boost,
                 });
             }
             let snapshot = json!(GameStateSnapshot {
