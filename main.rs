@@ -135,8 +135,8 @@ fn with_game(game: Arc<Mutex<Game>>) -> impl warp::Filter<Extract = (Arc<Mutex<G
 
 async fn game_update_loop() {
     let fixed_dt = 0.1;
-    let game_width = 800.0;
-    let game_height = 600.0;
+    let game_width = 2000.0;
+    let game_height = 1200.0;
     loop {
         {
             let mut game = GLOBAL_GAME.lock().await;

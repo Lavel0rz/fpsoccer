@@ -34,13 +34,25 @@ class MainScene extends Phaser.Scene {
     // Create your own ship.
     this.ship = this.add.sprite(400, 300, 'ship').setScale(0.5).setOrigin(0.5, 0.5);
     // Create ball sprite.
+
+    this.cameras.main.startFollow(this.ship);
+    this.cameras.main.setBounds(0, 0, 2000, 1200);
+
+    this.minimap = this.cameras.add(1300, 10, 200, 150)
+      .setZoom(200 / 2000)  // This equals 0.1
+      .setName('minimap');
+    this.minimap.setBounds(0, 0, 2000, 1200);
+    
+    // Optionally set a background color for the minimap.
+    this.minimap.setBackgroundColor(0x002244);
+    
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.5).setOrigin(0.5, 0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
     // New: Create boost meter display.
-    this.boostText = this.add.text(10, 10, "Boost: 200", { font: "16px Arial", fill: "#ffffff" });
-    this.boostBar = this.add.graphics();
-    
+    this.boostText = this.add.text(10, 10, "Boost: 200", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    this.boostBar = this.add.graphics().setScrollFactor(0);
+    this.minimap.ignore([this.boostText, this.boostBar]);
     this.connectWebSocket();
   
     // Keyboard input.
@@ -309,8 +321,8 @@ class MainScene extends Phaser.Scene {
   
 const config = {
   type: Phaser.AUTO,
-  width: 800,
-  height: 600,
+  width: 1600,
+  height: 1200,
   physics: {
     default: 'arcade',
     arcade: { gravity: { y: 0 }, debug: false }
