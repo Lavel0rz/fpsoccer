@@ -320,15 +320,28 @@ async fn game_update_loop() {
                     // Use an immutable borrow to check if the player is ready to shoot.
                     if let Some(player) = game.players.get(&owner_id) {
                         if player.input.shoot && player.shoot_cooldown <= 0.0 {
-                            let target_x = player.input.target_x.unwrap_or(player.ship.x);
-                            let target_y = player.input.target_y.unwrap_or(player.ship.y);
+                            // Clamp target_x/target_y within game boundaries.
+                            let target_x = player.input.target_x.unwrap_or(player.ship.x).clamp(0.0, game_width);
+                            let target_y = player.input.target_y.unwrap_or(player.ship.y).clamp(0.0, game_height);
+                            
                             let mut dx = target_x - player.ship.x;
                             let mut dy = target_y - player.ship.y;
                             let mut mag = (dx * dx + dy * dy).sqrt();
-                            if mag <= 0.0 {
+                            
+                            // Prevent a zero vector and enforce a minimum magnitude.
+                            if mag < 1.0 {
                                 dx = 0.0;
                                 dy = -1.0;
                                 mag = 1.0;
+                            }
+                            
+                            // Clamp the maximum allowed aim distance.
+                            let max_allowed = 500.0;
+                            if mag > max_allowed {
+                                let scale = max_allowed / mag;
+                                dx *= scale;
+                                dy *= scale;
+                                mag = max_allowed;
                             }
                             
                             // Physics parameters.
@@ -362,14 +375,12 @@ async fn game_update_loop() {
                             game.ball.grab_cooldown = 0.5;
                             
                             // Now obtain a mutable borrow to update the player's state.
-                            {
-                                if let Some(player_mut) = game.players.get_mut(&owner_id) {
-                                    let recoil_factor = 1.0;
-                                    player_mut.velocity.0 -= (total_impulse.0 / ship_mass) * recoil_factor;
-                                    player_mut.velocity.1 -= (total_impulse.1 / ship_mass) * recoil_factor;
-                                    player_mut.shoot_cooldown = 0.25;
-                                    player_mut.input.shoot = false;
-                                }
+                            if let Some(player_mut) = game.players.get_mut(&owner_id) {
+                                let recoil_factor = 1.0;
+                                player_mut.velocity.0 -= (total_impulse.0 / ship_mass) * recoil_factor;
+                                player_mut.velocity.1 -= (total_impulse.1 / ship_mass) * recoil_factor;
+                                player_mut.shoot_cooldown = 0.25;
+                                player_mut.input.shoot = false;
                             }
                             
                             // Finally, update ball grabbed state.
@@ -481,3 +492,4 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
     game_lock.clients.remove(&player_id);
     println!("Player {} disconnected.", player_id);
 }
+
