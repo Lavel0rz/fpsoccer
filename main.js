@@ -13,7 +13,8 @@ class MainScene extends Phaser.Scene {
     this.latestBallState = null;
     // Buffer for ball snapshots.
     this.ballHistory = [];
-    this.inputState = { left: false, right: false, up: false, down: false, shoot: false };
+    // Input state now includes boost.
+    this.inputState = { left: false, right: false, up: false, down: false, shoot: false, boost: false };
     this.inputSequence = 0;
     this.playerId = null; // Assigned by server.
     // Offset to align server timestamp with local time.
@@ -35,13 +36,16 @@ class MainScene extends Phaser.Scene {
     this.connectWebSocket();
   
     // Keyboard input.
+    // Use WASD for movement and Shift for boost.
     this.input.keyboard.on('keydown', (event) => {
-      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      const key = event.key.toLowerCase();
+      if (["w", "a", "s", "d", "shift"].includes(key)) {
         this.updateInputState(event.key, true);
       }
     });
     this.input.keyboard.on('keyup', (event) => {
-      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      const key = event.key.toLowerCase();
+      if (["w", "a", "s", "d", "shift"].includes(key)) {
         this.updateInputState(event.key, false);
       }
     });
@@ -60,26 +64,24 @@ class MainScene extends Phaser.Scene {
   }
   
   updateInputState(key, isDown) {
-    let changed = false;
-    if (key === 'ArrowLeft' && this.inputState.left !== isDown) {
-      this.inputState.left = isDown;
-      changed = true;
-    }
-    if (key === 'ArrowRight' && this.inputState.right !== isDown) {
-      this.inputState.right = isDown;
-      changed = true;
-    }
-    if (key === 'ArrowUp' && this.inputState.up !== isDown) {
+    // Normalize key to lowercase.
+    key = key.toLowerCase();
+    if (key === 'w') {
       this.inputState.up = isDown;
-      changed = true;
     }
-    if (key === 'ArrowDown' && this.inputState.down !== isDown) {
+    if (key === 's') {
       this.inputState.down = isDown;
-      changed = true;
     }
-    if (changed) {
-      this.sendInput();
+    if (key === 'a') {
+      this.inputState.left = isDown;
     }
+    if (key === 'd') {
+      this.inputState.right = isDown;
+    }
+    if (key === 'shift') {
+      this.inputState.boost = isDown;
+    }
+    this.sendInput();
   }
   
   sendInput(targetX, targetY) {
@@ -91,6 +93,7 @@ class MainScene extends Phaser.Scene {
         up: this.inputState.up,
         down: this.inputState.down,
         shoot: this.inputState.shoot,
+        boost: this.inputState.boost,
         target_x: targetX !== undefined ? targetX : null,
         target_y: targetY !== undefined ? targetY : null
       };
@@ -200,7 +203,6 @@ class MainScene extends Phaser.Scene {
   
   // Update ball using its history.
   updateBall(localTime) {
-    // Introduce a render delay of 100ms to have more snapshot data.
     const renderDelay = 100;
     const renderTime = localTime - this.serverTimeOffset - renderDelay;
   
@@ -208,7 +210,6 @@ class MainScene extends Phaser.Scene {
       let older = null;
       let newer = null;
       
-      // Find two snapshots that bracket renderTime.
       for (let i = 0; i < this.ballHistory.length - 1; i++) {
         if (this.ballHistory[i].timestamp <= renderTime && this.ballHistory[i + 1].timestamp >= renderTime) {
           older = this.ballHistory[i];
@@ -219,12 +220,11 @@ class MainScene extends Phaser.Scene {
       
       let targetX, targetY;
       
-      // If no exact bracket found, use the last two snapshots for extrapolation.
       if (!older || !newer) {
         older = this.ballHistory[this.ballHistory.length - 2];
         newer = this.ballHistory[this.ballHistory.length - 1];
         let extraTime = renderTime - newer.timestamp;
-        extraTime = Math.min(extraTime, 100); // Cap extrapolation time.
+        extraTime = Math.min(extraTime, 100);
         const deltaT = newer.timestamp - older.timestamp;
         const vx = (newer.x - older.x) / deltaT;
         const vy = (newer.y - older.y) / deltaT;
@@ -237,39 +237,31 @@ class MainScene extends Phaser.Scene {
         targetY = Phaser.Math.Linear(older.y, newer.y, t);
       }
       
-      // Apply a smoothing filter to transition from current to target position.
-      // Adjust the smoothing factor (0.1 here) to fine-tune responsiveness versus smoothness.
       this.ball.x = Phaser.Math.Linear(this.ball.x, targetX, 0.1);
       this.ball.y = Phaser.Math.Linear(this.ball.y, targetY, 0.1);
     }
   }
   
-  
   update(time, delta) {
-    // Update your own ship.
     const dt = delta / 1000;
     const shipSpeed = 100;
     if (this.inputState.left) { this.predictedState.x -= shipSpeed * dt; }
     if (this.inputState.right) { this.predictedState.x += shipSpeed * dt; }
     if (this.inputState.up) { this.predictedState.y -= shipSpeed * dt; }
     if (this.inputState.down) { this.predictedState.y += shipSpeed * dt; }
-    const alpha = 0.05;
+    const alpha = 0.075;
     this.predictedState.x = Phaser.Math.Linear(this.predictedState.x, this.serverState.ship.x, alpha);
     this.predictedState.y = Phaser.Math.Linear(this.predictedState.y, this.serverState.ship.y, alpha);
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
     
-    // Draw gravity circle.
     this.gravityCircle.clear();
     this.gravityCircle.lineStyle(2, 0xff0000, 1);
-    this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 20);
+    this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 15);
     
-    // Update remote ships.
     this.updateRemoteShips(time);
     
-    // Update ball rendering.
     if (this.latestBallState && this.latestBallState.grabbed) {
-      // When grabbed, force the ball to appear at the grabbing ship.
       let targetX, targetY;
       if (this.latestBallState.owner === this.playerId) {
         targetX = this.ship.x;
@@ -283,7 +275,6 @@ class MainScene extends Phaser.Scene {
       }
       this.ball.x = targetX;
       this.ball.y = targetY;
-      // Ensure the ball is drawn on top.
       this.ball.setDepth(1);
       this.ball.setVisible(true);
     } else if (this.ballHistory.length > 0) {
