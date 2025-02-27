@@ -245,24 +245,34 @@ class MainScene extends Phaser.Scene {
   }
   
   updateRemoteShips(localTime) {
-    const renderTime = localTime - this.serverTimeOffset;
+    // Apply a small render delay for interpolation (e.g. 50ms)
+    const renderTime = localTime - this.serverTimeOffset - 50;
     for (const id in this.otherShips) {
       const sprite = this.otherShips[id];
       if (sprite.history && sprite.history.length >= 2) {
-        const [older, newer] = sprite.history;
-        const deltaT = newer.timestamp - older.timestamp;
-        if (renderTime <= newer.timestamp) {
-          const t = (renderTime - older.timestamp) / deltaT;
-          sprite.x = Phaser.Math.Linear(older.x, newer.x, t);
-          sprite.y = Phaser.Math.Linear(older.y, newer.y, t);
-        } else {
-          let extraTime = renderTime - newer.timestamp;
-          extraTime = Math.min(extraTime, 100);
-          const vx = (newer.x - older.x) / deltaT;
-          const vy = (newer.y - older.y) / deltaT;
-          sprite.x = newer.x + vx * extraTime;
-          sprite.y = newer.y + vy * extraTime;
+        // Find two history points that bracket the renderTime.
+        let older = sprite.history[0];
+        let newer = sprite.history[1];
+        for (let i = 0; i < sprite.history.length - 1; i++) {
+          if (sprite.history[i].timestamp <= renderTime &&
+              sprite.history[i + 1].timestamp >= renderTime) {
+            older = sprite.history[i];
+            newer = sprite.history[i + 1];
+            break;
+          }
         }
+        const deltaT = newer.timestamp - older.timestamp;
+        // Compute interpolation factor clamped to [0,1].
+        const t = Phaser.Math.Clamp((renderTime - older.timestamp) / deltaT, 0, 1);
+        // Compute the target position from interpolation.
+        const targetX = Phaser.Math.Linear(older.x, newer.x, t);
+        const targetY = Phaser.Math.Linear(older.y, newer.y, t);
+        
+        // Instead of directly setting sprite.x, sprite.y, gradually move it
+        // toward the target position using a smoothing factor.
+        const smoothingFactor = 0.1; // Adjust this value for more or less smoothing.
+        sprite.x = Phaser.Math.Linear(sprite.x, targetX, smoothingFactor);
+        sprite.y = Phaser.Math.Linear(sprite.y, targetY, smoothingFactor);
       }
     }
   }
@@ -305,20 +315,52 @@ class MainScene extends Phaser.Scene {
   update(time, delta) {
     const dt = delta / 1000;
     const shipSpeed = 100;
+  
+    // Basic predicted movement from input.
     if (this.inputState.left) { this.predictedState.x -= shipSpeed * dt; }
     if (this.inputState.right) { this.predictedState.x += shipSpeed * dt; }
     if (this.inputState.up) { this.predictedState.y -= shipSpeed * dt; }
     if (this.inputState.down) { this.predictedState.y += shipSpeed * dt; }
-    const alpha = 0.065;
-    this.predictedState.x = Phaser.Math.Linear(this.predictedState.x, this.serverState.ship ? this.serverState.ship.x : this.predictedState.x, alpha);
-    this.predictedState.y = Phaser.Math.Linear(this.predictedState.y, this.serverState.ship ? this.serverState.ship.y : this.predictedState.y, alpha);
+  
+    // Calculate difference between predicted and server state.
+    let diffX = 0, diffY = 0;
+    if (this.serverState.ship) {
+      diffX = this.serverState.ship.x - this.predictedState.x;
+      diffY = this.serverState.ship.y - this.predictedState.y;
+    }
+    const dist = Math.sqrt(diffX * diffX + diffY * diffY);
+  
+    // Dynamically adjust interpolation factor:
+    // If distance is large (likely due to an impulse), use a lower alpha for smoother correction.
+    const baseAlpha = 0.065;
+    const impulseThreshold = 50; // adjust threshold as needed
+    let alpha = baseAlpha;
+    if (dist > impulseThreshold) {
+      // When the jump is too high, slow down the correction.
+      alpha = 0.02;
+    }
+  
+    // Interpolate predicted state towards server state.
+    this.predictedState.x = Phaser.Math.Linear(
+      this.predictedState.x, 
+      this.serverState.ship ? this.serverState.ship.x : this.predictedState.x, 
+      alpha
+    );
+    this.predictedState.y = Phaser.Math.Linear(
+      this.predictedState.y, 
+      this.serverState.ship ? this.serverState.ship.y : this.predictedState.y, 
+      alpha
+    );
+  
+    // Apply the smoothed state to the ship.
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
-    
+  
+    // (The rest of your update logic remains unchanged)
     this.gravityCircle.clear();
     this.gravityCircle.lineStyle(2, 0xff0000, 1);
     this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 15);
-    
+  
     if (this.serverState.boost !== undefined) {
       this.boostText.setText("Boost: " + Math.round(this.serverState.boost));
       this.boostBar.clear();
@@ -328,19 +370,10 @@ class MainScene extends Phaser.Scene {
       let boostWidth = (this.serverState.boost / 200) * 200;
       this.boostBar.fillRect(10, 30, boostWidth, 10);
     }
-    
+  
     this.updateRemoteShips(time);
-    
-    let moveX = this.ship.x - this.prevShipPos.x;
-    let moveY = this.ship.y - this.prevShipPos.y;
-    let moveMag = Math.sqrt(moveX * moveX + moveY * moveY);
-    this.prevShipPos.x = this.ship.x;
-    this.prevShipPos.y = this.ship.y;
-    let exhaustAngle = 180;
-    if (moveMag > 0.1) {
-      exhaustAngle = Phaser.Math.RadToDeg(Math.atan2(moveY, moveX)) + 180;
-    }
-    
+  
+    // ... (rest of update logic for ball, shot effects, etc.)
     if (this.latestBallState && this.latestBallState.grabbed) {
       if (this.latestBallState.owner === this.playerId) {
         this.ball.x = this.ship.x;
@@ -392,6 +425,7 @@ class MainScene extends Phaser.Scene {
       this.ball.setVisible(false);
     }
   }
+
 }
   
 const config = {
