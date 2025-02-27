@@ -31,15 +31,45 @@ class MainScene extends Phaser.Scene {
     this.emitter = null;
     // Store previous position to compute movement direction.
     this.prevShipPos = { x: 400, y: 300 };
+
+    // Store map objects loaded from JSON.
+    this.mapObjects = [];
   }
   
   preload() {
+    // Load game assets.
     this.load.image('ship', 'assets/ship.png');
     this.load.image('ball', 'assets/ball.png');
     this.load.image('spark', 'assets/ship_blue.png');
+    // Load map JSON data.
+    this.load.json('mapData', 'assets/map_data.json');
+    // Optionally, load an asset for a wall.
+    this.load.image('wall', 'assets/wall.png');
+    // If you have a goal asset:
+    this.load.image('goal', 'assets/goal.png');
   }
   
   create() {
+    // Render map objects from JSON.
+    const mapData = this.cache.json.get('mapData');
+    // Save for later use if needed.
+    this.mapObjects = mapData;
+    // For each object in the map, add a sprite or graphic.
+    mapData.forEach(obj => {
+      let sprite;
+      if (obj.type === 'wall') {
+        // Here we use an image asset for walls.
+        sprite = this.add.image(obj.x + obj.width/2, obj.y + obj.height/2, 'wall')
+          .setDisplaySize(obj.width, obj.height)
+          .setOrigin(0.5);
+      } else if (obj.type === 'goal') {
+        sprite = this.add.image(obj.x + obj.width/2, obj.y + obj.height/2, 'goal')
+          .setDisplaySize(obj.width, obj.height)
+          .setOrigin(0.5);
+      }
+      // Optionally, you could add the sprite to a static group for collisions.
+    });
+
     // Create ship and ball.
     this.ship = this.add.sprite(400, 300, 'ship').setScale(0.5).setOrigin(0.5);
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.5).setOrigin(0.5);
@@ -61,20 +91,14 @@ class MainScene extends Phaser.Scene {
     this.cameras.main.setBounds(0, 0, 2000, 1200);
     
     // Create particle emitter for exhaust.
-// Create a Particle Emitter Manager with emitter configuration.
-this.particles = this.add.particles('spark', {
-  lifespan: 300,
-  speed: { min: 50, max: 100 },
-  scale: { start: 0.5, end: 0 },
-  blendMode: 'ADD',
-  frequency: 50
-});
-
-
-
-// Make the particles follow the ship initially.
-this.particles.startFollow(this.ship);
-
+    this.particles = this.add.particles('spark', {
+      lifespan: 300,
+      speed: { min: 50, max: 100 },
+      scale: { start: 0.5, end: 0 },
+      blendMode: 'ADD',
+      frequency: 50
+    });
+    this.particles.startFollow(this.ship);
     
     // Save initial ship position.
     this.prevShipPos.x = this.ship.x;
@@ -83,7 +107,6 @@ this.particles.startFollow(this.ship);
     this.connectWebSocket();
     
     // Keyboard input.
-
     this.input.keyboard.on('keydown-F', () => {
       if (this.scale.isFullscreen) {
         this.scale.stopFullscreen();
@@ -109,7 +132,6 @@ this.particles.startFollow(this.ship);
       if (pointer.leftButtonDown()) {
         this.inputState.shoot = true;
         const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-        // Update aim target and send input.
         this.aimTarget.x = worldPoint.x;
         this.aimTarget.y = worldPoint.y;
         this.sendInput();
@@ -119,7 +141,6 @@ this.particles.startFollow(this.ship);
       this.inputState.shoot = false;
       this.sendInput();
     });
-    // Update aim target continuously.
     this.input.on('pointermove', (pointer) => {
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       this.aimTarget.x = worldPoint.x;
@@ -139,7 +160,6 @@ this.particles.startFollow(this.ship);
     this.sendInput();
   }
   
-  // Always include the latest aimTarget in the sent input.
   sendInput() {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
       const input = {
@@ -203,7 +223,6 @@ this.particles.startFollow(this.ship);
             }
           }
         }
-        // Update ball history.
         if (state.ball && state.ball.active) {
           state.ball.timestamp = serverTimestamp;
           this.latestBallState = state.ball;
@@ -286,7 +305,6 @@ this.particles.startFollow(this.ship);
   update(time, delta) {
     const dt = delta / 1000;
     const shipSpeed = 100;
-    // Update predicted state.
     if (this.inputState.left) { this.predictedState.x -= shipSpeed * dt; }
     if (this.inputState.right) { this.predictedState.x += shipSpeed * dt; }
     if (this.inputState.up) { this.predictedState.y -= shipSpeed * dt; }
@@ -313,23 +331,16 @@ this.particles.startFollow(this.ship);
     
     this.updateRemoteShips(time);
     
-    // --- Particle Effects Update ---
-    // Calculate movement vector (using current vs previous position)
     let moveX = this.ship.x - this.prevShipPos.x;
     let moveY = this.ship.y - this.prevShipPos.y;
     let moveMag = Math.sqrt(moveX * moveX + moveY * moveY);
-    // Save current position for next frame.
     this.prevShipPos.x = this.ship.x;
     this.prevShipPos.y = this.ship.y;
-    // Calculate angle for exhaust (opposite direction of movement)
-    let exhaustAngle = 180; // default angle (downwards)
+    let exhaustAngle = 180;
     if (moveMag > 0.1) {
       exhaustAngle = Phaser.Math.RadToDeg(Math.atan2(moveY, moveX)) + 180;
     }
-
-
     
-    // --- Handle ball rendering ---
     if (this.latestBallState && this.latestBallState.grabbed) {
       if (this.latestBallState.owner === this.playerId) {
         this.ball.x = this.ship.x;
@@ -380,13 +391,6 @@ this.particles.startFollow(this.ship);
     } else {
       this.ball.setVisible(false);
     }
-    if (this.inputState.boost) {
-      
-
-    } else {
-      
-    }
-    
   }
 }
   
