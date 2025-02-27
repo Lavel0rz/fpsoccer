@@ -143,17 +143,20 @@ const SHIP_HEIGHT: f32 = 40.0;
 const BALL_WIDTH: f32 = 20.0;
 const BALL_HEIGHT: f32 = 20.0;
 
+const WALL_COLLISION_INSET: f32 = 5.0;
+
 /// Resolves a rectangular collision for the ball.
+/// The wall's effective collision bounds are inset by WALL_COLLISION_INSET.
 fn resolve_rect_collision(ball: &mut Ball, wall: &MapObject) {
     let ball_left = ball.x - BALL_WIDTH / 2.0;
     let ball_right = ball.x + BALL_WIDTH / 2.0;
     let ball_top = ball.y - BALL_HEIGHT / 2.0;
     let ball_bottom = ball.y + BALL_HEIGHT / 2.0;
     
-    let wall_left = wall.x;
-    let wall_right = wall.x + wall.width;
-    let wall_top = wall.y;
-    let wall_bottom = wall.y + wall.height;
+    let wall_left = wall.x + WALL_COLLISION_INSET;
+    let wall_right = wall.x + wall.width - WALL_COLLISION_INSET;
+    let wall_top = wall.y + WALL_COLLISION_INSET;
+    let wall_bottom = wall.y + wall.height - WALL_COLLISION_INSET;
     
     let overlap_x = if ball_right > wall_left && ball_left < wall_right {
         let overlap_left = ball_right - wall_left;
