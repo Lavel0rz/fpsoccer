@@ -290,7 +290,7 @@ async fn game_update_loop() {
             let ball_grabbed = game.ball.grabbed;
             let ball_owner = game.ball.owner;
             for player in game.players.values_mut() {
-                let slowdown = if ball_grabbed && ball_owner == Some(player.id) { 0.9 } else { 1.0 };
+                let slowdown = if ball_grabbed && ball_owner == Some(player.id) { 0.8 } else { 1.0 };
                 let boost_multiplier = if player.input.boost && player.boost > 0.0 { 2.0 } else { 1.0 };
                 if player.input.boost && player.boost > 0.0 {
                     player.boost -= 40.0 * fixed_dt;

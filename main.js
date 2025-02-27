@@ -332,7 +332,7 @@ class MainScene extends Phaser.Scene {
   
     // Dynamically adjust interpolation factor:
     // If distance is large (likely due to an impulse), use a lower alpha for smoother correction.
-    const baseAlpha = 0.065;
+    const baseAlpha = 0.055;
     const impulseThreshold = 50; // adjust threshold as needed
     let alpha = baseAlpha;
     if (dist > impulseThreshold) {
