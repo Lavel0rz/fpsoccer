@@ -1,3 +1,28 @@
+class LatencyBuffer {
+  constructor(latencyMs) {
+    this.latencyMs = latencyMs;
+    this.buffer = [];
+  }
+  
+  push(message) {
+    const deliveryTime = Date.now() + this.latencyMs;
+    this.buffer.push({ message, deliveryTime });
+  }
+  
+  popReady() {
+    const now = Date.now();
+    const ready = [];
+    this.buffer = this.buffer.filter(item => {
+      if (item.deliveryTime <= now) {
+        ready.push(item.message);
+        return false;
+      }
+      return true;
+    });
+    return ready;
+  }
+}
+
 class MainScene extends Phaser.Scene {
   constructor() {
     super({ key: 'MainScene' });
@@ -23,42 +48,35 @@ class MainScene extends Phaser.Scene {
     // For shot effect.
     this.shotEffectDuration = 200;
     this.shotCorrection = { x: 0, y: 0 };
-    // Minimum distance from ship to consider for a valid shot vector.
     this.minDist = 20;
-
-    // For particle effects.
+    // Particle effects.
     this.particles = null;
     this.emitter = null;
-    // Store previous position to compute movement direction.
     this.prevShipPos = { x: 400, y: 300 };
-
-    // Store map objects loaded from JSON.
     this.mapObjects = [];
+    // Latency buffer for incoming messages (50ms delay).
+    this.incomingBuffer = new LatencyBuffer(100);
+    // Ping measurement.
+    this.lastPingSent = 0;
+    this.ping = 0;
+    this.pingText = null;
   }
   
   preload() {
-    // Load game assets.
     this.load.image('ship', 'assets/ship.png');
     this.load.image('ball', 'assets/ball.png');
     this.load.image('spark', 'assets/ship_blue.png');
-    // Load map JSON data.
     this.load.json('mapData', 'assets/map_data.json');
-    // Optionally, load an asset for a wall.
     this.load.image('wall', 'assets/wall.png');
-    // If you have a goal asset:
     this.load.image('goal', 'assets/goal.png');
   }
   
   create() {
-    // Render map objects from JSON.
     const mapData = this.cache.json.get('mapData');
-    // Save for later use if needed.
     this.mapObjects = mapData;
-    // For each object in the map, add a sprite or graphic.
     mapData.forEach(obj => {
       let sprite;
       if (obj.type === 'wall') {
-        // Here we use an image asset for walls.
         sprite = this.add.image(obj.x + obj.width/2, obj.y + obj.height/2, 'wall')
           .setDisplaySize(obj.width, obj.height)
           .setOrigin(0.5);
@@ -67,30 +85,26 @@ class MainScene extends Phaser.Scene {
           .setDisplaySize(obj.width, obj.height)
           .setOrigin(0.5);
       }
-      // Optionally, you could add the sprite to a static group for collisions.
     });
 
-    // Create ship and ball.
     this.ship = this.add.sprite(400, 300, 'ship').setScale(0.5).setOrigin(0.5);
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.5).setOrigin(0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
     
-    // Create boost meter.
     this.boostText = this.add.text(10, 10, "Boost: 200", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
     this.boostBar = this.add.graphics().setScrollFactor(0);
+    // Ping text display.
+    this.pingText = this.add.text(10, 40, "Ping: -- ms", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
     
-    // Minimap.
     this.minimap = this.cameras.add(1300, 10, 200, 150).setZoom(200 / 2000).setName('minimap');
     this.minimap.setBounds(0, 0, 2000, 1200);
     this.minimap.setBackgroundColor(0x002244);
-    this.minimap.ignore([this.boostText, this.boostBar]);
+    this.minimap.ignore([this.boostText, this.pingText, this.boostBar]);
     
-    // Follow ship.
     this.cameras.main.startFollow(this.ship);
     this.cameras.main.setBounds(0, 0, 2000, 1200);
     
-    // Create particle emitter for exhaust.
     this.particles = this.add.particles('spark', {
       lifespan: 300,
       speed: { min: 50, max: 100 },
@@ -100,13 +114,11 @@ class MainScene extends Phaser.Scene {
     });
     this.particles.startFollow(this.ship);
     
-    // Save initial ship position.
     this.prevShipPos.x = this.ship.x;
     this.prevShipPos.y = this.ship.y;
     
     this.connectWebSocket();
     
-    // Keyboard input.
     this.input.keyboard.on('keydown-F', () => {
       if (this.scale.isFullscreen) {
         this.scale.stopFullscreen();
@@ -127,7 +139,6 @@ class MainScene extends Phaser.Scene {
       }
     });
     
-    // Mouse input.
     this.input.on('pointerdown', (pointer) => {
       if (pointer.leftButtonDown()) {
         this.inputState.shoot = true;
@@ -147,6 +158,15 @@ class MainScene extends Phaser.Scene {
       this.aimTarget.y = worldPoint.y;
       if (pointer.leftButtonDown()) {
         this.sendInput();
+      }
+    });
+    
+    // Start sending ping messages every second.
+    this.time.addEvent({
+      delay: 1000,
+      loop: true,
+      callback: () => {
+        this.sendPing();
       }
     });
   }
@@ -178,63 +198,22 @@ class MainScene extends Phaser.Scene {
     }
   }
   
+  sendPing() {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.lastPingSent = Date.now();
+      const pingMsg = { type: "ping", timestamp: this.lastPingSent };
+      this.socket.send(JSON.stringify(pingMsg));
+    }
+  }
+  
   connectWebSocket() {
     this.socket = new WebSocket('ws://localhost:8080/ws');
     this.socket.addEventListener('open', () => {
       console.log('WebSocket connection opened.');
     });
     this.socket.addEventListener('message', (event) => {
-      try {
-        const state = JSON.parse(event.data);
-        if (state.your_id !== undefined && this.playerId === null) {
-          this.playerId = state.your_id;
-          console.log('Assigned player id:', this.playerId);
-          return;
-        }
-        const serverTimestamp = state.time;
-        if (!this.serverTimeOffset && serverTimestamp) {
-          this.serverTimeOffset = this.time.now - serverTimestamp;
-        }
-        if (state.players) {
-          if (state.players[this.playerId]) {
-            this.serverState.ship = state.players[this.playerId];
-            this.serverState.boost = state.players[this.playerId].boost;
-          }
-          for (const id in state.players) {
-            if (parseInt(id) === this.playerId) continue;
-            const shipState = state.players[id];
-            if (!this.otherShips[id]) {
-              const sprite = this.add.sprite(shipState.x, shipState.y, 'ship')
-                .setScale(0.5)
-                .setOrigin(0.5);
-              sprite.history = [{ x: shipState.x, y: shipState.y, timestamp: serverTimestamp }];
-              this.otherShips[id] = sprite;
-            } else {
-              const sprite = this.otherShips[id];
-              if (!sprite.history) sprite.history = [];
-              sprite.history.push({ x: shipState.x, y: shipState.y, timestamp: serverTimestamp });
-              if (sprite.history.length > 2) sprite.history.shift();
-            }
-          }
-          for (const id in this.otherShips) {
-            if (!state.players[id]) {
-              this.otherShips[id].destroy();
-              delete this.otherShips[id];
-            }
-          }
-        }
-        if (state.ball && state.ball.active) {
-          state.ball.timestamp = serverTimestamp;
-          this.latestBallState = state.ball;
-          this.ballHistory.push(state.ball);
-          if (this.ballHistory.length > 10) this.ballHistory.shift();
-        } else {
-          this.ballHistory = [];
-          this.latestBallState = null;
-        }
-      } catch (e) {
-        console.error('Failed to parse server message:', e);
-      }
+      // Push incoming messages into the latency buffer.
+      this.incomingBuffer.push(event.data);
     });
     this.socket.addEventListener('close', () => {
       console.log('WebSocket connection closed.');
@@ -245,32 +224,25 @@ class MainScene extends Phaser.Scene {
   }
   
   updateRemoteShips(localTime) {
-    // Apply a small render delay for interpolation (e.g. 50ms)
     const renderTime = localTime - this.serverTimeOffset - 50;
     for (const id in this.otherShips) {
       const sprite = this.otherShips[id];
       if (sprite.history && sprite.history.length >= 2) {
-        // Find two history points that bracket the renderTime.
         let older = sprite.history[0];
         let newer = sprite.history[1];
         for (let i = 0; i < sprite.history.length - 1; i++) {
           if (sprite.history[i].timestamp <= renderTime &&
-              sprite.history[i + 1].timestamp >= renderTime) {
+              sprite.history[i+1].timestamp >= renderTime) {
             older = sprite.history[i];
-            newer = sprite.history[i + 1];
+            newer = sprite.history[i+1];
             break;
           }
         }
         const deltaT = newer.timestamp - older.timestamp;
-        // Compute interpolation factor clamped to [0,1].
         const t = Phaser.Math.Clamp((renderTime - older.timestamp) / deltaT, 0, 1);
-        // Compute the target position from interpolation.
         const targetX = Phaser.Math.Linear(older.x, newer.x, t);
         const targetY = Phaser.Math.Linear(older.y, newer.y, t);
-        
-        // Instead of directly setting sprite.x, sprite.y, gradually move it
-        // toward the target position using a smoothing factor.
-        const smoothingFactor = 0.1; // Adjust this value for more or less smoothing.
+        const smoothingFactor = 0.1;
         sprite.x = Phaser.Math.Linear(sprite.x, targetX, smoothingFactor);
         sprite.y = Phaser.Math.Linear(sprite.y, targetY, smoothingFactor);
       }
@@ -284,9 +256,9 @@ class MainScene extends Phaser.Scene {
       let older = null;
       let newer = null;
       for (let i = 0; i < this.ballHistory.length - 1; i++) {
-        if (this.ballHistory[i].timestamp <= renderTime && this.ballHistory[i + 1].timestamp >= renderTime) {
+        if (this.ballHistory[i].timestamp <= renderTime && this.ballHistory[i+1].timestamp >= renderTime) {
           older = this.ballHistory[i];
-          newer = this.ballHistory[i + 1];
+          newer = this.ballHistory[i+1];
           break;
         }
       }
@@ -315,52 +287,39 @@ class MainScene extends Phaser.Scene {
   update(time, delta) {
     const dt = delta / 1000;
     const shipSpeed = 100;
-  
-    // Basic predicted movement from input.
     if (this.inputState.left) { this.predictedState.x -= shipSpeed * dt; }
     if (this.inputState.right) { this.predictedState.x += shipSpeed * dt; }
     if (this.inputState.up) { this.predictedState.y -= shipSpeed * dt; }
     if (this.inputState.down) { this.predictedState.y += shipSpeed * dt; }
-  
-    // Calculate difference between predicted and server state.
+    
     let diffX = 0, diffY = 0;
     if (this.serverState.ship) {
       diffX = this.serverState.ship.x - this.predictedState.x;
       diffY = this.serverState.ship.y - this.predictedState.y;
     }
     const dist = Math.sqrt(diffX * diffX + diffY * diffY);
-  
-    // Dynamically adjust interpolation factor:
-    // If distance is large (likely due to an impulse), use a lower alpha for smoother correction.
-    const baseAlpha = 0.055;
-    const impulseThreshold = 50; // adjust threshold as needed
+    const baseAlpha = 0.1;
+    const impulseThreshold = 50;
     let alpha = baseAlpha;
-    if (dist > impulseThreshold) {
-      // When the jump is too high, slow down the correction.
-      alpha = 0.02;
-    }
-  
-    // Interpolate predicted state towards server state.
+    if (dist > impulseThreshold) { alpha = 0.02; }
+    
     this.predictedState.x = Phaser.Math.Linear(
-      this.predictedState.x, 
-      this.serverState.ship ? this.serverState.ship.x : this.predictedState.x, 
+      this.predictedState.x,
+      this.serverState.ship ? this.serverState.ship.x : this.predictedState.x,
       alpha
     );
     this.predictedState.y = Phaser.Math.Linear(
-      this.predictedState.y, 
-      this.serverState.ship ? this.serverState.ship.y : this.predictedState.y, 
+      this.predictedState.y,
+      this.serverState.ship ? this.serverState.ship.y : this.predictedState.y,
       alpha
     );
-  
-    // Apply the smoothed state to the ship.
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
-  
-    // (The rest of your update logic remains unchanged)
+    
     this.gravityCircle.clear();
     this.gravityCircle.lineStyle(2, 0xff0000, 1);
     this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 15);
-  
+    
     if (this.serverState.boost !== undefined) {
       this.boostText.setText("Boost: " + Math.round(this.serverState.boost));
       this.boostBar.clear();
@@ -370,10 +329,73 @@ class MainScene extends Phaser.Scene {
       let boostWidth = (this.serverState.boost / 200) * 200;
       this.boostBar.fillRect(10, 30, boostWidth, 10);
     }
-  
+    
+    // Process messages from latency buffer.
+    const messages = this.incomingBuffer.popReady();
+    messages.forEach(data => {
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type === "pong" && msg.timestamp) {
+          // Compute ping as round-trip time.
+          this.ping = Date.now() - msg.timestamp;
+          this.pingText.setText("Ping: " + this.ping + " ms");
+          return;
+        }
+        // Process state updates.
+        if (msg.your_id !== undefined && this.playerId === null) {
+          this.playerId = msg.your_id;
+          console.log('Assigned player id:', this.playerId);
+          return;
+        }
+        const serverTimestamp = msg.time;
+        if (!this.serverTimeOffset && serverTimestamp) {
+          this.serverTimeOffset = this.time.now - serverTimestamp;
+        }
+        if (msg.players) {
+          if (msg.players[this.playerId]) {
+            this.serverState.ship = msg.players[this.playerId];
+            this.serverState.boost = msg.players[this.playerId].boost;
+          }
+          for (const id in msg.players) {
+            if (parseInt(id) === this.playerId) continue;
+            const shipState = msg.players[id];
+            if (!this.otherShips[id]) {
+              const sprite = this.add.sprite(shipState.x, shipState.y, 'ship')
+                .setScale(0.5)
+                .setOrigin(0.5);
+              sprite.history = [{ x: shipState.x, y: shipState.y, timestamp: serverTimestamp }];
+              this.otherShips[id] = sprite;
+            } else {
+              const sprite = this.otherShips[id];
+              if (!sprite.history) sprite.history = [];
+              sprite.history.push({ x: shipState.x, y: shipState.y, timestamp: serverTimestamp });
+              if (sprite.history.length > 2) sprite.history.shift();
+            }
+          }
+          for (const id in this.otherShips) {
+            if (!msg.players[id]) {
+              this.otherShips[id].destroy();
+              delete this.otherShips[id];
+            }
+          }
+        }
+        if (msg.ball && msg.ball.active) {
+          msg.ball.timestamp = serverTimestamp;
+          this.latestBallState = msg.ball;
+          this.ballHistory.push(msg.ball);
+          if (this.ballHistory.length > 10) this.ballHistory.shift();
+        } else {
+          this.ballHistory = [];
+          this.latestBallState = null;
+        }
+      } catch (e) {
+        console.error('Failed to parse server message:', e);
+      }
+    });
+    
     this.updateRemoteShips(time);
-  
-    // ... (rest of update logic for ball, shot effects, etc.)
+    
+    // (Remaining update logic for ball and shot effects remains unchanged.)
     if (this.latestBallState && this.latestBallState.grabbed) {
       if (this.latestBallState.owner === this.playerId) {
         this.ball.x = this.ship.x;
@@ -425,7 +447,6 @@ class MainScene extends Phaser.Scene {
       this.ball.setVisible(false);
     }
   }
-
 }
   
 const config = {

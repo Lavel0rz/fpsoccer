@@ -28,6 +28,16 @@ static MAP_OBJECTS: Lazy<Vec<MapObject>> = Lazy::new(|| {
     serde_json::from_str(json_str).expect("Failed to parse map_data.json")
 });
 
+
+// --- Ping Message Types ---
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum PingMessage {
+    #[serde(rename = "ping")]
+    Ping { timestamp: u64 },
+    #[serde(rename = "pong")]
+    Pong { timestamp: u64 },
+}
 // --- Game Definitions ---
 #[derive(Debug, Default)]
 struct InputState {
@@ -535,11 +545,18 @@ async fn game_update_loop() {
                 players: players_snapshot,
                 ball: game.ball.clone(),
             });
+            let snapshot_str = snapshot.to_string();
+            // For each client, spawn a task to delay sending the snapshot by 50ms.
             for (_id, sender) in game.clients.iter_mut() {
-                let _ = sender.lock().await.send(Message::text(snapshot.to_string())).await;
+                let msg = snapshot_str.clone();
+                let sender = Arc::clone(sender);
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(0)).await;
+                    let _ = sender.lock().await.send(Message::text(msg)).await;
+                });
             }
         }
-        sleep(Duration::from_millis((fixed_dt * 1000.0) as u64)).await;
+        sleep(Duration::from_millis((fixed_dt * 800.0) as u64)).await;
     }
 }
 
@@ -576,6 +593,20 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
             Ok(msg) => {
                 if msg.is_text() {
                     let txt = msg.to_str().unwrap_or("");
+                    // Check for ping messages.
+                    if let Ok(ping_msg) = serde_json::from_str::<PingMessage>(txt) {
+                        match ping_msg {
+                            PingMessage::Ping { timestamp } => {
+                                // Respond immediately with a pong.
+                                let pong = PingMessage::Pong { timestamp };
+                                let pong_text = serde_json::to_string(&pong).unwrap();
+                                let _ = tx.lock().await.send(Message::text(pong_text)).await;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Otherwise, parse as regular input.
                     match serde_json::from_str::<InputMessage>(txt) {
                         Ok(input_msg) => {
                             let mut game_lock = game.lock().await;
@@ -609,7 +640,6 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
             }
         }
     }
-
     let mut game_lock = game.lock().await;
     game_lock.players.remove(&player_id);
     game_lock.clients.remove(&player_id);
