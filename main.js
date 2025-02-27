@@ -5,7 +5,7 @@ class MainScene extends Phaser.Scene {
     this.ship = null;
     this.predictedState = { x: 400, y: 300 };
     this.serverState = { ship: { x: 400, y: 300, seq: 0 } };
-    this.otherShips = {}; 
+    this.otherShips = {};
     this.socket = null;
     this.ball = null;
     this.latestBallState = null;
@@ -25,11 +25,18 @@ class MainScene extends Phaser.Scene {
     this.shotCorrection = { x: 0, y: 0 };
     // Minimum distance from ship to consider for a valid shot vector.
     this.minDist = 20;
+
+    // For particle effects.
+    this.particles = null;
+    this.emitter = null;
+    // Store previous position to compute movement direction.
+    this.prevShipPos = { x: 400, y: 300 };
   }
   
   preload() {
     this.load.image('ship', 'assets/ship.png');
     this.load.image('ball', 'assets/ball.png');
+    this.load.image('spark', 'assets/ship_blue.png');
   }
   
   create() {
@@ -53,9 +60,37 @@ class MainScene extends Phaser.Scene {
     this.cameras.main.startFollow(this.ship);
     this.cameras.main.setBounds(0, 0, 2000, 1200);
     
+    // Create particle emitter for exhaust.
+// Create a Particle Emitter Manager with emitter configuration.
+this.particles = this.add.particles('spark', {
+  lifespan: 300,
+  speed: { min: 50, max: 100 },
+  scale: { start: 0.5, end: 0 },
+  blendMode: 'ADD',
+  frequency: 50
+});
+
+
+
+// Make the particles follow the ship initially.
+this.particles.startFollow(this.ship);
+
+    
+    // Save initial ship position.
+    this.prevShipPos.x = this.ship.x;
+    this.prevShipPos.y = this.ship.y;
+    
     this.connectWebSocket();
     
     // Keyboard input.
+
+    this.input.keyboard.on('keydown-F', () => {
+      if (this.scale.isFullscreen) {
+        this.scale.stopFullscreen();
+      } else {
+        this.scale.startFullscreen();
+      }
+    });
     this.input.keyboard.on('keydown', (event) => {
       const key = event.key.toLowerCase();
       if (["w", "a", "s", "d", "shift"].includes(key)) {
@@ -89,7 +124,6 @@ class MainScene extends Phaser.Scene {
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       this.aimTarget.x = worldPoint.x;
       this.aimTarget.y = worldPoint.y;
-      // If left button is held, also send the new aim target.
       if (pointer.leftButtonDown()) {
         this.sendInput();
       }
@@ -279,16 +313,30 @@ class MainScene extends Phaser.Scene {
     
     this.updateRemoteShips(time);
     
-    // Handle ball rendering.
+    // --- Particle Effects Update ---
+    // Calculate movement vector (using current vs previous position)
+    let moveX = this.ship.x - this.prevShipPos.x;
+    let moveY = this.ship.y - this.prevShipPos.y;
+    let moveMag = Math.sqrt(moveX * moveX + moveY * moveY);
+    // Save current position for next frame.
+    this.prevShipPos.x = this.ship.x;
+    this.prevShipPos.y = this.ship.y;
+    // Calculate angle for exhaust (opposite direction of movement)
+    let exhaustAngle = 180; // default angle (downwards)
+    if (moveMag > 0.1) {
+      exhaustAngle = Phaser.Math.RadToDeg(Math.atan2(moveY, moveX)) + 180;
+    }
+
+
+    
+    // --- Handle ball rendering ---
     if (this.latestBallState && this.latestBallState.grabbed) {
       if (this.latestBallState.owner === this.playerId) {
-        // If you own the ball, attach it to your ship.
         this.ball.x = this.ship.x;
         this.ball.y = this.ship.y;
         this.ball.setDepth(1);
         this.ball.setVisible(true);
       } else {
-        // If another client grabbed it, follow their ship.
         const grabbingSprite = this.otherShips[this.latestBallState.owner];
         if (grabbingSprite) {
           this.ball.x = grabbingSprite.x;
@@ -304,7 +352,6 @@ class MainScene extends Phaser.Scene {
         }
       }
     } else if (this.recentShot) {
-      // Render shot effect.
       const pointer = this.input.activePointer;
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
       let dx = worldPoint.x - this.ship.x;
@@ -316,11 +363,11 @@ class MainScene extends Phaser.Scene {
         dy = Math.sin(angle) * this.minDist;
         mag = this.minDist;
       }
-      const offset = 25;
-      const offsetX = this.ship.x + (dx / mag) * (offset + this.shotCorrection.x);
-      const offsetY = this.ship.y + (dy / mag) * (offset + this.shotCorrection.y);
-      this.ball.x = offsetX;
-      this.ball.y = offsetY;
+      const shotOffset = 25;
+      const shotX = this.ship.x + (dx / mag) * (shotOffset + this.shotCorrection.x);
+      const shotY = this.ship.y + (dy / mag) * (shotOffset + this.shotCorrection.y);
+      this.ball.x = shotX;
+      this.ball.y = shotY;
       this.ball.setDepth(1);
       this.ball.setVisible(true);
       if (time - this.shotTime > this.shotEffectDuration) {
@@ -333,6 +380,13 @@ class MainScene extends Phaser.Scene {
     } else {
       this.ball.setVisible(false);
     }
+    if (this.inputState.boost) {
+      
+
+    } else {
+      
+    }
+    
   }
 }
   
