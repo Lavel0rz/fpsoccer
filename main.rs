@@ -1,3 +1,4 @@
+
 use warp::Filter;
 use futures::{StreamExt, SinkExt};
 use serde::{Deserialize, Serialize};
@@ -556,7 +557,7 @@ async fn game_update_loop() {
                 });
             }
         }
-        sleep(Duration::from_millis((fixed_dt * 800.0) as u64)).await;
+        sleep(Duration::from_millis((fixed_dt * 700.0) as u64)).await;
     }
 }
 
