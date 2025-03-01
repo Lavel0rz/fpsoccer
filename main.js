@@ -42,9 +42,9 @@ class MainScene extends Phaser.Scene {
     this.serverTimeOffset = 0;
     // For continuous aiming.
     this.aimTarget = { x: 400, y: 300 };
-    // Boost display.
-    this.boostText = null;
-    this.boostBar = null;
+    // Remove the bar; we'll use a circular indicator.
+    // Ping display.
+    this.pingText = null;
     // For shot effect.
     this.shotEffectDuration = 200;
     this.shotCorrection = { x: 0, y: 0 };
@@ -54,12 +54,13 @@ class MainScene extends Phaser.Scene {
     this.emitter = null;
     this.prevShipPos = { x: 400, y: 300 };
     this.mapObjects = [];
-    // Latency buffer for incoming messages (50ms delay).
-    this.incomingBuffer = new LatencyBuffer(100);
+    // Latency buffer for incoming messages.
+    this.incomingBuffer = new LatencyBuffer(0);
     // Ping measurement.
     this.lastPingSent = 0;
     this.ping = 0;
-    this.pingText = null;
+    // Graphics object for boost indicator.
+    this.boostCircle = null;
   }
   
   preload() {
@@ -72,6 +73,9 @@ class MainScene extends Phaser.Scene {
   }
   
   create() {
+    // Disable context menu so right click can be used for boost.
+    this.input.mouse.disableContextMenu();
+    
     const mapData = this.cache.json.get('mapData');
     this.mapObjects = mapData;
     mapData.forEach(obj => {
@@ -87,20 +91,22 @@ class MainScene extends Phaser.Scene {
       }
     });
 
-    this.ship = this.add.sprite(400, 300, 'ship').setScale(0.5).setOrigin(0.5);
+    this.ship = this.add.sprite(400, 300, 'ship').setScale(0.7).setOrigin(0.5);
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.5).setOrigin(0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
     
-    this.boostText = this.add.text(10, 10, "Boost: 200", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
-    this.boostBar = this.add.graphics().setScrollFactor(0);
-    // Ping text display.
-    this.pingText = this.add.text(10, 40, "Ping: -- ms", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    // Remove boost bar and text; instead, create a graphics object for circular boost.
+    this.boostCircle = this.add.graphics();
+    // Also create ping text.
+    this.pingText = this.add.text(10, 10, "Ping: -- ms", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
     
-    this.minimap = this.cameras.add(1300, 10, 200, 150).setZoom(200 / 2000).setName('minimap');
+    this.minimap = this.cameras.add(1300, 10, 200, 150)
+      .setZoom(200 / 2000)
+      .setName('minimap');
     this.minimap.setBounds(0, 0, 2000, 1200);
     this.minimap.setBackgroundColor(0x002244);
-    this.minimap.ignore([this.boostText, this.pingText, this.boostBar]);
+    this.minimap.ignore([this.pingText, this.boostCircle]);
     
     this.cameras.main.startFollow(this.ship);
     this.cameras.main.setBounds(0, 0, 2000, 1200);
@@ -119,6 +125,7 @@ class MainScene extends Phaser.Scene {
     
     this.connectWebSocket();
     
+    // Keyboard input (for movement only now).
     this.input.keyboard.on('keydown-F', () => {
       if (this.scale.isFullscreen) {
         this.scale.stopFullscreen();
@@ -128,19 +135,23 @@ class MainScene extends Phaser.Scene {
     });
     this.input.keyboard.on('keydown', (event) => {
       const key = event.key.toLowerCase();
-      if (["w", "a", "s", "d", "shift"].includes(key)) {
+      if (["w", "a", "s", "d"].includes(key)) {
         this.updateInputState(key, true);
       }
     });
     this.input.keyboard.on('keyup', (event) => {
       const key = event.key.toLowerCase();
-      if (["w", "a", "s", "d", "shift"].includes(key)) {
+      if (["w", "a", "s", "d"].includes(key)) {
         this.updateInputState(key, false);
       }
     });
     
+    // Pointer events: right-click for boost, left-click for shoot.
     this.input.on('pointerdown', (pointer) => {
-      if (pointer.leftButtonDown()) {
+      if (pointer.button === 2) { // right-click for boost
+        this.inputState.boost = true;
+        this.sendInput();
+      } else if (pointer.leftButtonDown()) {
         this.inputState.shoot = true;
         const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
         this.aimTarget.x = worldPoint.x;
@@ -148,9 +159,14 @@ class MainScene extends Phaser.Scene {
         this.sendInput();
       }
     });
-    this.input.on('pointerup', () => {
-      this.inputState.shoot = false;
-      this.sendInput();
+    this.input.on('pointerup', (pointer) => {
+      if (pointer.button === 2) {
+        this.inputState.boost = false;
+        this.sendInput();
+      } else if (pointer.button === 0) {
+        this.inputState.shoot = false;
+        this.sendInput();
+      }
     });
     this.input.on('pointermove', (pointer) => {
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
@@ -176,7 +192,6 @@ class MainScene extends Phaser.Scene {
     if (key === 's') this.inputState.down = isDown;
     if (key === 'a') this.inputState.left = isDown;
     if (key === 'd') this.inputState.right = isDown;
-    if (key === 'shift') this.inputState.boost = isDown;
     this.sendInput();
   }
   
@@ -212,7 +227,6 @@ class MainScene extends Phaser.Scene {
       console.log('WebSocket connection opened.');
     });
     this.socket.addEventListener('message', (event) => {
-      // Push incoming messages into the latency buffer.
       this.incomingBuffer.push(event.data);
     });
     this.socket.addEventListener('close', () => {
@@ -256,7 +270,8 @@ class MainScene extends Phaser.Scene {
       let older = null;
       let newer = null;
       for (let i = 0; i < this.ballHistory.length - 1; i++) {
-        if (this.ballHistory[i].timestamp <= renderTime && this.ballHistory[i+1].timestamp >= renderTime) {
+        if (this.ballHistory[i].timestamp <= renderTime &&
+            this.ballHistory[i+1].timestamp >= renderTime) {
           older = this.ballHistory[i];
           newer = this.ballHistory[i+1];
           break;
@@ -316,32 +331,36 @@ class MainScene extends Phaser.Scene {
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
     
-    this.gravityCircle.clear();
-    this.gravityCircle.lineStyle(2, 0xff0000, 1);
-    this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 15);
+    //this.gravityCircle.clear();
+    //this.gravityCircle.lineStyle(2, 0xff0000, 1);
+    //this.gravityCircle.strokeCircle(this.ship.x, this.ship.y, 15);
+    
+    // Instead of a bar chart, draw a circular boost indicator around the ship.
+    this.boostCircle.clear();
+    // For example, the full circle represents 200 boost.
+    let boostRatio = this.serverState.boost !== undefined ? (this.serverState.boost / 200) : 1;
+    // Draw the circle with an arc: start at -90 deg.
+    let startAngle = Phaser.Math.DegToRad(-90);
+    let endAngle = startAngle + boostRatio * Phaser.Math.DegToRad(360);
+    // Draw a green arc if boost is available; gray otherwise.
+    this.boostCircle.lineStyle(4, 0x00ff00, 1);
+    this.boostCircle.beginPath();
+    this.boostCircle.arc(this.ship.x, this.ship.y, 40, startAngle, endAngle, false);
+    this.boostCircle.strokePath();
     
     if (this.serverState.boost !== undefined) {
-      this.boostText.setText("Boost: " + Math.round(this.serverState.boost));
-      this.boostBar.clear();
-      this.boostBar.fillStyle(0x666666, 1);
-      this.boostBar.fillRect(10, 30, 200, 10);
-      this.boostBar.fillStyle(0x00ff00, 1);
-      let boostWidth = (this.serverState.boost / 200) * 200;
-      this.boostBar.fillRect(10, 30, boostWidth, 10);
+      // Optionally, hide the old boost bar.
     }
     
-    // Process messages from latency buffer.
     const messages = this.incomingBuffer.popReady();
     messages.forEach(data => {
       try {
         const msg = JSON.parse(data);
         if (msg.type === "pong" && msg.timestamp) {
-          // Compute ping as round-trip time.
           this.ping = Date.now() - msg.timestamp;
           this.pingText.setText("Ping: " + this.ping + " ms");
           return;
         }
-        // Process state updates.
         if (msg.your_id !== undefined && this.playerId === null) {
           this.playerId = msg.your_id;
           console.log('Assigned player id:', this.playerId);
@@ -395,7 +414,6 @@ class MainScene extends Phaser.Scene {
     
     this.updateRemoteShips(time);
     
-    // (Remaining update logic for ball and shot effects remains unchanged.)
     if (this.latestBallState && this.latestBallState.grabbed) {
       if (this.latestBallState.owner === this.playerId) {
         this.ball.x = this.ship.x;
@@ -450,7 +468,7 @@ class MainScene extends Phaser.Scene {
 }
   
 const config = {
-  type: Phaser.AUTO,
+  type: Phaser.WEBGL,
   width: 1600,
   height: 1200,
   physics: {
