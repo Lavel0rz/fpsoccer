@@ -248,10 +248,6 @@ fn resolve_ship_collision(ship: &mut Ship, velocity: &mut (f32, f32), wall: &Map
             velocity.1 = 0.0;
         }
     }
-
-
-
-
 }
 #[tokio::main]
 async fn main() {
@@ -641,6 +637,16 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                         Err(e) => eprintln!("Failed to parse input from player {}: {:?}", player_id, e),
                     }
                 } else if msg.is_close() {
+                    // Handle ball state reset on disconnect
+                    let mut game_lock = game.lock().await;
+                    if let Some(player) = game_lock.players.remove(&player_id) {
+                        if game_lock.ball.grabbed && game_lock.ball.owner == Some(player_id) {
+                            // Reset ball state
+                            game_lock.ball.grabbed = false;
+                            game_lock.ball.owner = None;
+                            game_lock.ball.grab_cooldown = 0.5; // Optional cooldown after dropping
+                        }
+                    }
                     break;
                 }
             },
@@ -651,7 +657,6 @@ async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
         }
     }
     let mut game_lock = game.lock().await;
-    game_lock.players.remove(&player_id);
     game_lock.clients.remove(&player_id);
     println!("Player {} disconnected.", player_id);
 }
