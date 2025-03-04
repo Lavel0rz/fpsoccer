@@ -76,7 +76,7 @@ class MainScene extends Phaser.Scene {
   }
   
   preload() {
-    this.load.image('ship', 'assets/ship.png');
+    this.load.image('ship', 'assets/ship_blue.png');
     this.load.image('ball', 'assets/ball.png');
     this.load.image('spark', 'assets/ship_blue.png');
     this.load.json('mapData', 'assets/map_data.json');
@@ -104,7 +104,7 @@ class MainScene extends Phaser.Scene {
       }
     });
 
-    this.ship = this.add.sprite(400, 300, 'ship').setScale(0.7).setOrigin(0.5);
+    this.ship = this.add.sprite(400, 300, 'ship').setScale(0.5).setOrigin(0.5);
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.5).setOrigin(0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
@@ -201,13 +201,18 @@ class MainScene extends Phaser.Scene {
 
     this.particleEmitter = this.add.particles(0, 0, 'flares', {
       frame: 'white',
-      lifespan: 1500,
-      angle: { min: -100, max: -80 },
-      scale: { start: 0.15, end: 0, ease: 'sine.out' },
+      lifespan: 50,
+      angle: { min: 0, max: 360 },
+      scale: { start: 0.1, end: 0, ease: 'flares' },
       speed: { min: 200, max: 300 },
-      advance: 2000,
+      advance: 1000,
       blendMode: 'ADD'
     });
+    
+    // Hide and stop the emitter
+   // Assuming 'this.particleEmitter' is your emitter instance
+  this.particleEmitter.on = false;
+
   }
   
   updateInputState(key, isDown) {
@@ -306,32 +311,62 @@ class MainScene extends Phaser.Scene {
       console.error('WebSocket error:', error);
     });
   }
-  
-  updateRemoteShips(localTime) {
-    const renderTime = localTime - this.serverTimeOffset - 50;
-    for (const id in this.otherShips) {
+// New variable to track the last position of remote ships
+updateRemoteShips(localTime) {
+  const renderTime = localTime - this.serverTimeOffset - 50;
+  for (const id in this.otherShips) {
       const sprite = this.otherShips[id];
       if (sprite.history && sprite.history.length >= 2) {
-        let older = sprite.history[0];
-        let newer = sprite.history[1];
-        for (let i = 0; i < sprite.history.length - 1; i++) {
-          if (sprite.history[i].timestamp <= renderTime &&
-              sprite.history[i+1].timestamp >= renderTime) {
-            older = sprite.history[i];
-            newer = sprite.history[i+1];
-            break;
+          let older = sprite.history[0];
+          let newer = sprite.history[1];
+          for (let i = 0; i < sprite.history.length - 1; i++) {
+              if (sprite.history[i].timestamp <= renderTime &&
+                  sprite.history[i + 1].timestamp >= renderTime) {
+                  older = sprite.history[i];
+                  newer = sprite.history[i + 1];
+                  break;
+              }
           }
-        }
-        const deltaT = newer.timestamp - older.timestamp;
-        const t = Phaser.Math.Clamp((renderTime - older.timestamp) / deltaT, 0, 1);
-        const targetX = Phaser.Math.Linear(older.x, newer.x, t);
-        const targetY = Phaser.Math.Linear(older.y, newer.y, t);
-        const smoothingFactor = 0.1;
-        sprite.x = Phaser.Math.Linear(sprite.x, targetX, smoothingFactor);
-        sprite.y = Phaser.Math.Linear(sprite.y, targetY, smoothingFactor);
+          const deltaT = newer.timestamp - older.timestamp;
+          const t = Phaser.Math.Clamp((renderTime - older.timestamp) / deltaT, 0, 1);
+          const targetX = Phaser.Math.Linear(older.x, newer.x, t);
+          const targetY = Phaser.Math.Linear(older.y, newer.y, t);
+          const smoothingFactor = 0.1;
+          sprite.x = Phaser.Math.Linear(sprite.x, targetX, smoothingFactor);
+          sprite.y = Phaser.Math.Linear(sprite.y, targetY, smoothingFactor);
+
+          // Generate particles for remote ships
+          this.generateRemoteShipParticles(sprite, older, newer);
       }
-    }
   }
+}
+
+// New method to generate particles for remote ships only when they move
+generateRemoteShipParticles(sprite, older, newer) {
+  // Calculate the movement distance
+  const distanceMoved = Phaser.Math.Distance.Between(older.x, older.y, newer.x, newer.y);
+
+  // Only generate particles if the ship has moved significantly (adjust threshold as needed)
+  const movementThreshold = 2.5; // Example: Only emit particles if the ship has moved by 5 pixels or more
+  if (distanceMoved > movementThreshold) {
+      const dx = newer.x - older.x;
+      const dy = newer.y - older.y;
+
+      const direction = new Phaser.Math.Vector2(dx, dy).normalize();
+
+      if (direction.length() > 0) {
+          // Calculate the opposite direction
+          const oppositeDirection = direction.clone().negate();
+
+          // Emit particles in the opposite direction
+          const particleX = sprite.x + oppositeDirection.x * 20 // Adjust the multiplier for distance
+          const particleY = sprite.y + oppositeDirection.y * 20; // Adjust the multiplier for distance
+          this.particleEmitter.emitParticleAt(particleX, particleY);
+      }
+  }
+}
+
+
   
   updateBall(localTime, delta) {
     if (!this.latestBallState) return;
@@ -400,14 +435,18 @@ class MainScene extends Phaser.Scene {
 }
 
   generateParticles() {
-    const dx = this.inputState.right - this.inputState.left;
-    const dy = this.inputState.down - this.inputState.up;
+    const dx = this.inputState.left - this.inputState.right;
+    const dy = this.inputState.up - this.inputState.down;
     const direction = new Phaser.Math.Vector2(dx, dy).normalize();
 
     if (direction.length() > 0) {
-      const particleX = this.ship.x - direction.x * 20;
-      const particleY = this.ship.y - direction.y * 20;
-      this.particleEmitter.emitParticleAt(particleX, particleY);
+        // Calculate the opposite direction
+        const oppositeDirection = direction.clone().negate();
+
+        // Emit particles in the opposite direction
+        const particleX = this.ship.x - oppositeDirection.x * 20; // Adjust the multiplier for distance
+        const particleY = this.ship.y - oppositeDirection.y * 20; // Adjust the multiplier for distance
+        this.particleEmitter.emitParticleAt(particleX, particleY);
     }
   }
 
