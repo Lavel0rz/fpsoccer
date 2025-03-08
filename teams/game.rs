@@ -49,10 +49,28 @@ pub struct Game {
 
 impl Game {
     pub fn new() -> Self {
+        // Calculate the exact middle position between goals
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        
+        // Find the min and max coordinates of all goals
+        for goal in MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
+            min_x = min_x.min(goal.x);
+            max_x = max_x.max(goal.x + goal.width);
+            min_y = min_y.min(goal.y);
+            max_y = max_y.max(goal.y + goal.height);
+        }
+        
+        // Calculate the middle position
+        let middle_x = (min_x + max_x) / 2.0;
+        let middle_y = (min_y + max_y) / 2.0;
+        
         Self {
             ball: Ball {
-                x: 400.0,
-                y: 300.0,
+                x: middle_x,
+                y: middle_y,
                 vx: 0.0,
                 vy: 0.0,
                 active: true,
@@ -369,15 +387,20 @@ impl Game {
         // Determine the middle Y position to distinguish north from south goals
         let mut min_y = f32::INFINITY;
         let mut max_y = f32::NEG_INFINITY;
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
         
-        // Find the min and max Y coordinates of all goals
+        // Find the min and max coordinates of all goals
         for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
             min_y = min_y.min(goal.y);
             max_y = max_y.max(goal.y + goal.height);
+            min_x = min_x.min(goal.x);
+            max_x = max_x.max(goal.x + goal.width);
         }
         
-        // Calculate the middle Y position
+        // Calculate the middle position
         let middle_y = (min_y + max_y) / 2.0;
+        let middle_x = (min_x + max_x) / 2.0;
         
         println!("Ball position: ({}, {})", self.ball.x, self.ball.y);
         println!("Goal Y range: {} to {}, middle: {}", min_y, max_y, middle_y);
@@ -404,9 +427,9 @@ impl Game {
                     println!("Red team scored! Score: Red {} - Blue {}", self.team1_score, self.team2_score);
                 }
                 
-                // Reset ball position to center
-                self.ball.x = game_width / 2.0;
-                self.ball.y = game_height / 2.0;
+                // Reset ball position to exact middle between goals
+                self.ball.x = middle_x;
+                self.ball.y = middle_y;
                 self.ball.vx = 0.0;
                 self.ball.vy = 0.0;
                 self.ball.grabbed = false;
