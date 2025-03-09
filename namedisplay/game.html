@@ -52,6 +52,54 @@
       background-color: #3e8e41;
     }
     
+    #team-buttons {
+      position: fixed;
+      top: 50px;
+      left: 10px;
+      z-index: 9999; /* Ensure it's above everything */
+      display: none;
+      background-color: rgba(0, 0, 0, 0.7);
+      padding: 10px;
+      border-radius: 5px;
+      border: 1px solid #555;
+    }
+    
+    .team-button {
+      display: block;
+      width: 120px;
+      margin-bottom: 5px;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9em;
+      text-align: center;
+      font-weight: bold;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+    }
+    
+    .team-button:hover {
+      transform: scale(1.05);
+      transition: transform 0.2s;
+    }
+    
+    #join-red-team {
+      background-color: #ff4444;
+    }
+    
+    #join-red-team:hover {
+      background-color: #ff6666;
+    }
+    
+    #join-blue-team {
+      background-color: #4444ff;
+    }
+    
+    #join-blue-team:hover {
+      background-color: #6666ff;
+    }
+    
     #start-screen {
       display: flex;
       flex-direction: column;
@@ -109,6 +157,11 @@
 <body>
   <button id="back-to-lobby" onclick="window.location.href='lobby.html'">Back to Lobby</button>
   
+  <div id="team-buttons">
+    <button id="join-red-team" class="team-button">Join Red Team</button>
+    <button id="join-blue-team" class="team-button">Join Blue Team</button>
+  </div>
+  
   <div id="start-screen">
     <h1>Ready to Play</h1>
     <div id="game-info" class="game-info"></div>
@@ -122,6 +175,19 @@
     // Add debug logging to help troubleshoot
     console.log('Game page loaded');
     console.log('URL parameters:', window.location.search);
+    
+    // Initialize team buttons
+    window.addEventListener('load', function() {
+      console.log('Page fully loaded, initializing team buttons');
+      const redButton = document.getElementById('join-red-team');
+      const blueButton = document.getElementById('join-blue-team');
+      
+      if (redButton && blueButton) {
+        console.log('Team buttons found in DOM');
+      } else {
+        console.error('Team buttons not found in DOM!');
+      }
+    });
     
     // Check if we're on itch.io or another hosting platform
     function isOnItchIo() {
@@ -227,9 +293,16 @@
     
     // Start button event listener
     startButton.addEventListener('click', function() {
+      console.log('Start button clicked');
+      
       // Hide start screen and show game container
       document.getElementById('start-screen').style.display = 'none';
       gameContainer.style.display = 'block';
+      
+      // Show team buttons
+      const teamButtons = document.getElementById('team-buttons');
+      teamButtons.style.display = 'block';
+      console.log('Team buttons should now be visible:', teamButtons);
       
       // Ensure the game container is properly centered
       window.addEventListener('resize', function() {
@@ -267,6 +340,27 @@
         connectionStatus.className = 'error';
         startButton.disabled = true;
       });
+    
+    // Team switching functionality
+    document.getElementById('join-red-team').addEventListener('click', function() {
+      console.log('Red team button clicked');
+      if (window.gameInstance && window.gameInstance.switchTeam) {
+        console.log('Calling switchTeam with Red');
+        window.gameInstance.switchTeam('Red');
+      } else {
+        console.error('gameInstance or switchTeam not available', window.gameInstance);
+      }
+    });
+
+    document.getElementById('join-blue-team').addEventListener('click', function() {
+      console.log('Blue team button clicked');
+      if (window.gameInstance && window.gameInstance.switchTeam) {
+        console.log('Calling switchTeam with Blue');
+        window.gameInstance.switchTeam('Blue');
+      } else {
+        console.error('gameInstance or switchTeam not available', window.gameInstance);
+      }
+    });
   </script>
 </body>
 </html> 

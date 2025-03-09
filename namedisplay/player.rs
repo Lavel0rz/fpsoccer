@@ -6,7 +6,9 @@ use crate::game::InputState;
 // Define team enum
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
 pub enum Team {
+    #[serde(rename = "Red")]
     Red,
+    #[serde(rename = "Blue")]
     Blue,
 }
 

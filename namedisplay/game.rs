@@ -541,6 +541,28 @@ impl Game {
             }
         }
     }
+
+    fn create_snapshot(&self) -> GameStateSnapshot {
+        let mut players = HashMap::new();
+        for (id, player) in &self.players {
+            players.insert(*id, ShipState {
+                x: player.ship.x,
+                y: player.ship.y,
+                seq: player.last_seq,
+                boost: player.boost,
+                team: player.team,
+                display_name: player.display_name.clone(),
+            });
+        }
+        
+        GameStateSnapshot {
+            time: chrono::Utc::now().timestamp_millis() as u64,
+            players,
+            ball: self.ball.clone(),
+            team1_score: self.team1_score,
+            team2_score: self.team2_score,
+        }
+    }
 }
 
 pub static GLOBAL_GAME: Lazy<Arc<Mutex<Game>>> = Lazy::new(|| Arc::new(Mutex::new(Game::new())));

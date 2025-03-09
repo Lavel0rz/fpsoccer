@@ -35,6 +35,14 @@ enum PingMessage {
     Pong { timestamp: u64 },
 }
 
+// Add a new message type for team switching
+#[derive(Deserialize, Debug)]
+struct TeamSwitchMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    team: String,
+}
+
 pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
     let (tx, mut rx) = ws.split();
     let tx = Arc::new(Mutex::new(tx));
@@ -85,8 +93,9 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
         match result {
             Ok(msg) => {
                 if msg.is_text() {
-                    let txt = msg.to_str().unwrap_or("");
-                    // Check for ping messages.
+                    let txt = msg.to_str().unwrap_or_default();
+                    
+                    // Check for simple ping messages
                     if txt == "ping" {
                         // Simple ping-pong for connection testing
                         if let Err(e) = tx.lock().await.send(Message::text("pong")).await {
@@ -95,6 +104,7 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                         continue;
                     }
                     
+                    // Try to parse as ping message
                     if let Ok(ping_msg) = serde_json::from_str::<PingMessage>(txt) {
                         match ping_msg {
                             PingMessage::Ping { timestamp } => {
@@ -106,7 +116,58 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                             }
                             _ => {}
                         }
+                        continue;
                     }
+                    
+                    // Try to parse as team switch message
+                    if let Ok(team_msg) = serde_json::from_str::<TeamSwitchMessage>(txt) {
+                        if team_msg.message_type == "switch_team" {
+                            println!("Received team switch request from player {}: {:?}", player_id, team_msg.team);
+                            
+                            let mut game = game.lock().await;
+                            
+                            // Convert string team to enum
+                            let new_team_str = team_msg.team.as_str();
+                            let new_team = match new_team_str {
+                                "Red" => crate::player::Team::Red,
+                                "Blue" => crate::player::Team::Blue,
+                                _ => {
+                                    // Invalid team, skip processing
+                                    continue;
+                                }
+                            };
+                            
+                            // Get current player team before modifying
+                            let current_team = match game.players.get(&player_id) {
+                                Some(player) => player.team,
+                                None => continue, // Player not found
+                            };
+                            
+                            // Only switch if it's a different team
+                            if new_team != current_team {
+                                // Update team counts first
+                                match current_team {
+                                    crate::player::Team::Red => game.red_team_count = game.red_team_count.saturating_sub(1),
+                                    crate::player::Team::Blue => game.blue_team_count = game.blue_team_count.saturating_sub(1),
+                                }
+                                
+                                // Update new team count
+                                match new_team {
+                                    crate::player::Team::Red => game.red_team_count += 1,
+                                    crate::player::Team::Blue => game.blue_team_count += 1,
+                                }
+                                
+                                // Now update the player's team
+                                if let Some(player) = game.players.get_mut(&player_id) {
+                                    player.team = new_team;
+                                    println!("Player {} switched to {:?} team", player_id, new_team);
+                                }
+                            }
+                            
+                            continue;
+                        }
+                    }
+                    
                     // Otherwise, parse as regular input.
                     match serde_json::from_str::<InputMessage>(txt) {
                         Ok(input_msg) => {

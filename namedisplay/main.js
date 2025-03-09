@@ -213,25 +213,60 @@ class MainScene extends Phaser.Scene {
     // Create boost circle graphics
     this.boostCircle = this.add.graphics();
     
-    // Create ping text
+    // Create UI elements
     this.pingText = this.add.text(10, 10, "Ping: -- ms", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
     
-    // Add score text
-    this.scoreText = this.add.text(10, 40, "Score: Red 0 - Blue 0", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    // Create score display with multiple text objects for different colors
+    const scoreY = 40;
+    this.scoreLabel = this.add.text(10, scoreY, "Score: ", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    this.redScoreText = this.add.text(this.scoreLabel.x + this.scoreLabel.width, scoreY, "0", { font: "16px Arial", fill: "#ff0000" }).setScrollFactor(0);
+    this.scoreSeparator = this.add.text(this.redScoreText.x + this.redScoreText.width, scoreY, " - ", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    this.blueScoreText = this.add.text(this.scoreSeparator.x + this.scoreSeparator.width, scoreY, "0", { font: "16px Arial", fill: "#0000ff" }).setScrollFactor(0);
     
-    // Add team text
     this.teamText = this.add.text(10, 70, "Team: --", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
     
-    // Create minimap camera
-    this.minimap = this.cameras.add(10, 10, 200, 150).setZoom(0.1).setName('mini');
-    this.minimap.setBackgroundColor(0x002244);
-    this.minimap.scrollX = 0;
-    this.minimap.scrollY = 0;
-    this.minimap.setBounds(0, 0, 2000, 1200); // Make sure to set bounds
-
-    // Ignore UI elements in minimap - only if all elements exist
-    if (this.pingText && this.scoreText && this.teamText && this.boostCircle && this.playerNameText) {
-      this.minimap.ignore([this.pingText, this.scoreText, this.teamText, this.boostCircle, this.playerNameText]);
+    // Get player display name from window object or use default
+    const playerName = window.PLAYER_DISPLAY_NAME || 'You';
+    
+    // Add player name text above ship
+    this.playerNameText = this.add.text(400, 270, playerName, 
+      { fontSize: '14px', fill: '#fff', stroke: '#000', strokeThickness: 3 }
+    ).setOrigin(0.5);
+    
+    // Try to create minimap with safety checks
+    try {
+      // Create minimap camera in the top right corner
+      this.minimap = this.cameras.add(this.sys.game.config.width - 210, 10, 200, 150)
+        .setZoom(200 / 2000)
+        .setName('minimap');
+      
+      if (this.minimap) {
+        this.minimap.setBounds(0, 0, 2000, 1200);
+        this.minimap.setBackgroundColor(0x002244);
+        
+        // Delay the ignore call to ensure all elements are initialized
+        this.time.delayedCall(200, () => {
+          try {
+            // Create an array of elements to ignore, filtering out any undefined ones
+            const elementsToIgnore = [
+              this.pingText, 
+              this.scoreLabel, this.redScoreText, this.scoreSeparator, this.blueScoreText,
+              this.teamText, 
+              this.boostCircle, 
+              this.playerNameText
+            ].filter(element => element !== undefined);
+            
+            // Only call ignore if we have elements to ignore and minimap exists
+            if (elementsToIgnore.length > 0 && this.minimap && typeof this.minimap.ignore === 'function') {
+              this.minimap.ignore(elementsToIgnore);
+            }
+          } catch (error) {
+            console.error('Error setting up minimap ignore:', error);
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error creating minimap:', error);
     }
     
     this.cameras.main.startFollow(this.ship, true, 0.1, 0.1);
@@ -310,13 +345,17 @@ class MainScene extends Phaser.Scene {
       }
     });
     
-    // Get player display name from window object or use default
-    const playerName = window.PLAYER_DISPLAY_NAME || 'You';
+    // Make the game instance accessible globally for team switching
+    window.gameInstance = this;
+    console.log('Game instance set to window.gameInstance');
     
-    // Add player name text above ship
-    this.playerNameText = this.add.text(400, 270, playerName, 
-      { fontSize: '14px', fill: '#fff', stroke: '#000', strokeThickness: 3 }
-    ).setOrigin(0.5);
+    // Set up ping interval
+    this.pingInterval = setInterval(() => {
+      this.sendPing();
+    }, 2000); // Send ping every 2 seconds
+    
+    // Handle window resize
+    this.scale.on('resize', this.handleResize, this);
   }
   
   updateInputState(key, isDown) {
@@ -361,8 +400,10 @@ class MainScene extends Phaser.Scene {
   
   sendPing() {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.lastPingSent = Date.now();
-      const pingMsg = { type: "ping", timestamp: this.lastPingSent };
+      const pingMsg = {
+        type: "ping",
+        timestamp: Date.now()
+      };
       this.socket.send(JSON.stringify(pingMsg));
     }
   }
@@ -558,11 +599,13 @@ class MainScene extends Phaser.Scene {
   
   updateRemoteShips(localTime) {
     const renderTime = localTime - this.serverTimeOffset - 50;
+    
     for (const id in this.otherShips) {
       const sprite = this.otherShips[id];
       if (sprite.history && sprite.history.length >= 2) {
         let older = sprite.history[0];
         let newer = sprite.history[1];
+        
         for (let i = 0; i < sprite.history.length - 1; i++) {
           if (sprite.history[i].timestamp <= renderTime &&
               sprite.history[i + 1].timestamp >= renderTime) {
@@ -571,6 +614,7 @@ class MainScene extends Phaser.Scene {
             break;
           }
         }
+        
         const deltaT = newer.timestamp - older.timestamp;
         const t = Phaser.Math.Clamp((renderTime - older.timestamp) / deltaT, 0, 1);
         const targetX = Phaser.Math.Linear(older.x, newer.x, t);
@@ -578,9 +622,26 @@ class MainScene extends Phaser.Scene {
         const smoothingFactor = 0.1;
         sprite.x = Phaser.Math.Linear(sprite.x, targetX, smoothingFactor);
         sprite.y = Phaser.Math.Linear(sprite.y, targetY, smoothingFactor);
-
+        
+        // Update name text position with smooth interpolation
+        if (sprite.nameText) {
+          sprite.nameText.x = sprite.x;
+          sprite.nameText.y = sprite.y - 30;
+        }
+        
         // Generate particles for remote ships
         this.generateRemoteShipParticles(sprite, older, newer);
+      }
+      
+      // Update team color if it has changed
+      if (sprite.currentTeam !== sprite.team) {
+        sprite.currentTeam = sprite.team;
+        if (sprite.team === 'Red') {
+          sprite.setTint(0xff0000); // Red tint
+        } else if (sprite.team === 'Blue') {
+          sprite.setTint(0x0000ff); // Blue tint
+        }
+        console.log(`Updated remote player ${id} team to ${sprite.team}`);
       }
     }
   }
@@ -782,6 +843,18 @@ class MainScene extends Phaser.Scene {
           return;
         }
         
+        // Handle goal event
+        if (msg.type === "goal") {
+          this.serverState.team1_score = msg.team1_score;
+          this.serverState.team2_score = msg.team2_score;
+          this.updateScoreDisplay();
+          
+          // Show goal animation with team color
+          const scorerTeam = msg.scorer_team;
+          this.showGoalAnimation(scorerTeam);
+          return;
+        }
+        
         // Handle game state update
         const serverTimestamp = msg.time;
         if (!this.serverTimeOffset && serverTimestamp) {
@@ -798,6 +871,18 @@ class MainScene extends Phaser.Scene {
             // Update our own name display
             if (this.playerNameText && msg.players[this.clientId].display_name) {
               this.playerNameText.setText(msg.players[this.clientId].display_name);
+            }
+            
+            // Update ship color based on team
+            if (msg.players[this.clientId].team) {
+              if (msg.players[this.clientId].team === 'Red') {
+                this.ship.setTint(0xff0000); // Red tint
+              } else if (msg.players[this.clientId].team === 'Blue') {
+                this.ship.setTint(0x0000ff); // Blue tint
+              }
+              
+              // Update team display
+              this.updateTeamDisplay(msg.players[this.clientId].team);
             }
           }
           
@@ -819,6 +904,10 @@ class MainScene extends Phaser.Scene {
                 sprite.setTint(0x0000ff); // Blue tint
               }
               
+              // Store the current team for change detection
+              sprite.team = shipState.team;
+              sprite.currentTeam = shipState.team;
+              
               // Add player name text above ship
               const nameText = this.add.text(shipState.x, shipState.y - 30, 
                 shipState.display_name || `Player ${id}`, 
@@ -835,9 +924,10 @@ class MainScene extends Phaser.Scene {
               // Update player name if it changed
               if (sprite.nameText) {
                 sprite.nameText.setText(shipState.display_name || `Player ${id}`);
-                sprite.nameText.x = shipState.x;
-                sprite.nameText.y = shipState.y - 30;
               }
+              
+              // Update team if it changed
+              sprite.team = shipState.team;
               
               if (!sprite.history) sprite.history = [];
               sprite.history.push({ x: shipState.x, y: shipState.y, timestamp: serverTimestamp });
@@ -896,12 +986,12 @@ class MainScene extends Phaser.Scene {
         
         // Update scores
         if (msg.team1_score !== undefined && msg.team2_score !== undefined) {
-          this.team1Score = msg.team1_score;
-          this.team2Score = msg.team2_score;
+          this.serverState.team1_score = msg.team1_score;
+          this.serverState.team2_score = msg.team2_score;
           this.updateScoreDisplay();
         }
-      } catch (e) {
-        console.error('Failed to parse server message:', e);
+      } catch (error) {
+        console.error('Error processing message:', error);
       }
     });
     
@@ -915,26 +1005,50 @@ class MainScene extends Phaser.Scene {
     this.generateParticles();
   }
 
-  // Add method to update score display
+  // Update the score display
   updateScoreDisplay() {
-    this.scoreText.setText(`Score: Red ${this.team1Score} - Blue ${this.team2Score}`);
+    if (this.serverState.team1_score !== undefined && this.serverState.team2_score !== undefined) {
+      // Update the individual score text objects
+      this.redScoreText.setText(this.serverState.team1_score.toString());
+      this.blueScoreText.setText(this.serverState.team2_score.toString());
+      
+      // Reposition the elements to account for changing text widths
+      this.scoreSeparator.x = this.redScoreText.x + this.redScoreText.width;
+      this.blueScoreText.x = this.scoreSeparator.x + this.scoreSeparator.width;
+    }
   }
   
-  // Add method to update team display
-  updateTeamDisplay() {
-    if (this.playerTeam) {
-      const teamColor = this.playerTeam === 'red' ? '#ff0000' : '#0000ff';
-      this.teamText.setText(`Team: ${this.playerTeam.toUpperCase()}`);
+  // Update the updateTeamDisplay method to handle both formats of team names
+  updateTeamDisplay(team) {
+    if (team) {
+      // Normalize team name format (could be 'Red'/'Blue' or 'red'/'blue')
+      const normalizedTeam = typeof team === 'string' ? team.toLowerCase() : team;
+      const displayTeam = typeof team === 'string' ? team : (normalizedTeam === 'red' ? 'Red' : 'Blue');
+      
+      console.log(`Updating team display to: ${displayTeam} (normalized: ${normalizedTeam})`);
+      
+      this.teamText.setText(`Team: ${displayTeam}`);
+      
+      // Set color based on team
+      const teamColor = normalizedTeam === 'red' ? '#ff0000' : '#0000ff';
       this.teamText.setStyle({ font: "16px Arial", fill: teamColor });
+      
+      // Store the current team
+      this.playerTeam = normalizedTeam;
     }
   }
   
   // Add method to show goal animation
   showGoalAnimation(scorerTeam) {
+    console.log(`Showing goal animation for team: ${scorerTeam}`);
+    
+    // Normalize team name
+    const normalizedTeam = typeof scorerTeam === 'string' ? scorerTeam.toLowerCase() : scorerTeam;
+    
     // Create a goal text that fades out
-    const teamColor = scorerTeam === 'red' ? '#ff0000' : '#0000ff';
-    const opposingTeam = scorerTeam === 'red' ? 'BLUE' : 'RED';
-    const opposingColor = scorerTeam === 'red' ? '#0000ff' : '#ff0000';
+    const teamColor = normalizedTeam === 'red' ? '#ff0000' : '#0000ff';
+    const opposingTeam = normalizedTeam === 'red' ? 'BLUE' : 'RED';
+    const opposingColor = normalizedTeam === 'red' ? '#0000ff' : '#ff0000';
     
     // Create a background rectangle for better visibility
     const bgRect = this.add.rectangle(
@@ -958,11 +1072,9 @@ class MainScene extends Phaser.Scene {
     const teamText = this.add.text(
       this.cameras.main.centerX, 
       this.cameras.main.centerY + 30, 
-      `${scorerTeam.toUpperCase()} TEAM SCORED`, 
+      `${normalizedTeam.toUpperCase()} TEAM SCORED`, 
       { font: 'bold 32px Arial', fill: teamColor, align: 'center' }
     ).setOrigin(0.5).setScrollFactor(0);
-    
-
     
     // Add a tween to make the text and background fade out
     this.tweens.add({
@@ -1025,7 +1137,49 @@ class MainScene extends Phaser.Scene {
       this.playerNameText.destroy();
     }
     
+    // Clean up UI elements
+    if (this.scoreLabel) this.scoreLabel.destroy();
+    if (this.redScoreText) this.redScoreText.destroy();
+    if (this.scoreSeparator) this.scoreSeparator.destroy();
+    if (this.blueScoreText) this.blueScoreText.destroy();
+    
+    // Remove resize listener
+    this.scale.off('resize', this.handleResize, this);
+    
     this.otherShips = {};
+  }
+
+  // Add team switching method
+  switchTeam(team) {
+    console.log(`switchTeam called with team: ${team}`);
+    
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      console.log('Cannot switch team: WebSocket not connected');
+      return;
+    }
+    
+    console.log(`Sending team switch request to server: ${team}`);
+    
+    // Send team switch request to server
+    const message = {
+      type: 'switch_team',
+      team: team
+    };
+    
+    this.socket.send(JSON.stringify(message));
+  }
+
+  // Handle window resize
+  handleResize(gameSize) {
+    // Reposition minimap to top right corner with safety checks
+    if (this.minimap && typeof this.minimap.x !== 'undefined') {
+      try {
+        this.minimap.x = gameSize.width - 210;
+        this.minimap.y = 10;
+      } catch (error) {
+        console.error('Error repositioning minimap:', error);
+      }
+    }
   }
 }
   
