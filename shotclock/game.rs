@@ -14,15 +14,31 @@ use warp::ws::{Message, WebSocket};
 use futures::stream::SplitSink;
 use futures::SinkExt;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InputState {
     pub left: bool,
     pub right: bool,
     pub up: bool,
     pub down: bool,
     pub shoot: bool,
+    pub boost: bool,
     pub target_x: Option<f32>,
     pub target_y: Option<f32>,
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self {
+            left: false,
+            right: false,
+            up: false,
+            down: false,
+            shoot: false,
+            boost: false,
+            target_x: None,
+            target_y: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -48,23 +64,11 @@ pub struct Game {
 
 impl Game {
     pub fn new() -> Self {
-        // Calculate the exact middle position between goals
-        let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
-        
-        // Find the min and max coordinates of all goals
-        for goal in MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
-            min_x = min_x.min(goal.x);
-            max_x = max_x.max(goal.x + goal.width);
-            min_y = min_y.min(goal.y);
-            max_y = max_y.max(goal.y + goal.height);
-        }
-        
-        // Calculate the middle position
-        let middle_x = (min_x + max_x) / 2.0;
-        let middle_y = (min_y + max_y) / 2.0;
+        // Calculate the middle of the game area
+        let game_width = 1600.0;
+        let game_height = 900.0;
+        let middle_x = game_width / 2.0;
+        let middle_y = game_height / 2.0;
         
         Self {
             ball: Ball {
@@ -453,7 +457,7 @@ impl Game {
     }
     
     // Add a new method to check for goal collisions
-    fn check_goal_collision(&mut self, game_width: f32, game_height: f32) {
+    fn check_goal_collision(&mut self, _game_width: f32, _game_height: f32) {
         let ball_left = self.ball.x - BALL_WIDTH / 2.0;
         let ball_right = self.ball.x + BALL_WIDTH / 2.0;
         let ball_top = self.ball.y - BALL_HEIGHT / 2.0;

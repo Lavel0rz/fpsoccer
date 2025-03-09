@@ -13,6 +13,7 @@ pub struct Ball {
     pub grab_cooldown: f32,
     pub owner: Option<u32>,
     pub last_shooter: Option<u32>,
+    pub shot_clock: f32,
 }
 
 impl Ball {
@@ -42,6 +43,7 @@ impl Ball {
         self.vy = 0.0;
         self.x = player_x;
         self.y = player_y;
+        self.shot_clock = 10.0;
     }
 
     pub fn release(&mut self, shooter_id: u32) {
@@ -49,6 +51,7 @@ impl Ball {
         self.last_shooter = Some(shooter_id);
         self.owner = None;
         self.grab_cooldown = 0.5;
+        self.shot_clock = 10.0;
     }
 }
 
