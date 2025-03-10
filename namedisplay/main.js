@@ -205,6 +205,15 @@ class MainScene extends Phaser.Scene {
       }
     });
 
+    // Create a background that extends beyond the playable area
+    const gameWidth = 2000;
+    const gameHeight = 1200;
+    const extendedWidth = gameWidth * 2;  // Increase from 1.5 to 2
+    const extendedHeight = gameHeight * 2; // Increase from 1.5 to 2
+    
+    // Create a background grid pattern that extends beyond the map
+    this.createBackgroundGrid(extendedWidth, extendedHeight);
+
     this.ship = this.add.sprite(400, 300, 'ship').setScale(0.09);
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.55).setOrigin(0.5);
     this.ball.setVisible(false);
@@ -241,7 +250,7 @@ class MainScene extends Phaser.Scene {
         .setName('minimap');
       
       if (this.minimap) {
-        this.minimap.setBounds(0, 0, 2000, 1200);
+        this.minimap.setBounds(0, 0, extendedWidth, extendedHeight);
         this.minimap.setBackgroundColor(0x002244);
         
         // Delay the ignore call to ensure all elements are initialized
@@ -269,8 +278,15 @@ class MainScene extends Phaser.Scene {
       console.error('Error creating minimap:', error);
     }
     
-    this.cameras.main.startFollow(this.ship, true, 0.1, 0.1);
-    this.cameras.main.setBounds(0, 0, 6000, 6200);
+    // Set up main camera to follow the ship with improved settings
+    this.cameras.main.startFollow(this.ship, true, 0.05, 0.05);
+    
+    // Set camera bounds to be much larger than the playable area to ensure consistent following
+    // Use negative values to allow camera to move beyond all edges
+    this.cameras.main.setBounds(-gameWidth/2, -gameHeight/2, extendedWidth, extendedHeight);
+    
+    // Add a slight offset to the camera to make the ship not perfectly centered
+    this.cameras.main.followOffset.set(-50, -50);
     
     // Create particle emitter for ship movement
     this.particleEmitter = this.add.particles(0, 0, 'flares', {
@@ -1003,6 +1019,9 @@ class MainScene extends Phaser.Scene {
     
     // Generate particles
     this.generateParticles();
+    
+    // Update camera position
+    this.updateCamera();
   }
 
   // Update the score display
@@ -1179,6 +1198,53 @@ class MainScene extends Phaser.Scene {
       } catch (error) {
         console.error('Error repositioning minimap:', error);
       }
+    }
+  }
+
+  // Add a new method to create a background grid
+  createBackgroundGrid(width, height) {
+    const graphics = this.add.graphics();
+    
+    // Set line style for the grid
+    graphics.lineStyle(1, 0x333333, 0.3);
+    
+    // Draw vertical lines
+    for (let x = 0; x <= width; x += 100) {
+      graphics.moveTo(x, 0);
+      graphics.lineTo(x, height);
+    }
+    
+    // Draw horizontal lines
+    for (let y = 0; y <= height; y += 100) {
+      graphics.moveTo(0, y);
+      graphics.lineTo(width, y);
+    }
+    
+    // Draw the grid
+    graphics.strokePath();
+    
+    // Set depth to ensure it's behind everything else
+    graphics.setDepth(-100);
+  }
+  
+  // Add a new method to update camera position with dynamic offset
+  updateCamera() {
+    if (!this.ship) return;
+    
+    // Use a fixed offset instead of one that changes with velocity
+    const fixedOffsetX = -50;
+    const fixedOffsetY = -50;
+    
+    // Apply the fixed offset
+    this.cameras.main.followOffset.set(fixedOffsetX, fixedOffsetY);
+    
+    // Debug info
+    if (this.debugText) {
+      this.debugText.setText(
+        `Ship: (${Math.round(this.ship.x)}, ${Math.round(this.ship.y)})\n` +
+        `Camera: (${Math.round(this.cameras.main.scrollX)}, ${Math.round(this.cameras.main.scrollY)})\n` +
+        `Offset: (${Math.round(this.cameras.main.followOffset.x)}, ${Math.round(this.cameras.main.followOffset.y)})`
+      );
     }
   }
 }
