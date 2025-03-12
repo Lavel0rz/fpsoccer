@@ -378,10 +378,10 @@ class MainScene extends Phaser.Scene {
     
     // Add direction indicator
     this.directionIndicator = this.add.graphics();
-    this.directionIndicator.lineStyle(2, 0xffffff, 1);
+    this.directionIndicator.lineStyle(3, 0xffffff, 0.8);
     this.directionIndicator.beginPath();
     this.directionIndicator.moveTo(0, 0);
-    this.directionIndicator.lineTo(30, 0);
+    this.directionIndicator.lineTo(40, 0);
     this.directionIndicator.closePath();
     this.directionIndicator.strokePath();
   }
@@ -421,6 +421,30 @@ class MainScene extends Phaser.Scene {
           // Send updated input state with shoot set to false
           this.sendInput();
         }, 100);
+      }
+    });
+    
+    // Track mouse movement to update aim direction
+    this.input.on('pointermove', (pointer) => {
+      // Convert pointer position to world coordinates
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+      
+      // Update aim target to mouse position
+      this.aimTarget.x = worldPoint.x;
+      this.aimTarget.y = worldPoint.y;
+      
+      // Calculate direction from ship to mouse cursor
+      const dx = worldPoint.x - this.ship.x;
+      const dy = worldPoint.y - this.ship.y;
+      const mag = Math.sqrt(dx * dx + dy * dy);
+      
+      // Update movement direction for aiming if the mouse is far enough from the ship
+      if (mag > 10) {
+        this.movementDirection.x = dx / mag;
+        this.movementDirection.y = dy / mag;
+        
+        // Send updated input with new aim target
+        this.sendInput();
       }
     });
   }
@@ -1099,32 +1123,36 @@ class MainScene extends Phaser.Scene {
         }
       }
       
-      // Gradually turn towards the target direction
-      if (targetLength > 0) {
-        // Interpolate current direction towards target direction
-        this.movementDirection.x = Phaser.Math.Linear(this.movementDirection.x, this.targetDirection.x, this.turnSpeed);
-        this.movementDirection.y = Phaser.Math.Linear(this.movementDirection.y, this.targetDirection.y, this.turnSpeed);
-        
-        // Normalize the movement direction
-        const moveLength = Math.sqrt(this.movementDirection.x * this.movementDirection.x + this.movementDirection.y * this.movementDirection.y);
-        if (moveLength > 0) {
-          this.movementDirection.x /= moveLength;
-          this.movementDirection.y /= moveLength;
+      // For desktop, we don't update the movement direction from keyboard input
+      // since it's now controlled by the mouse position
+      if (this.isMobile || this.controllerConnected) {
+        // Gradually turn towards the target direction (for mobile and controller)
+        if (targetLength > 0) {
+          // Interpolate current direction towards target direction
+          this.movementDirection.x = Phaser.Math.Linear(this.movementDirection.x, this.targetDirection.x, this.turnSpeed);
+          this.movementDirection.y = Phaser.Math.Linear(this.movementDirection.y, this.targetDirection.y, this.turnSpeed);
+          
+          // Normalize the movement direction
+          const moveLength = Math.sqrt(this.movementDirection.x * this.movementDirection.x + this.movementDirection.y * this.movementDirection.y);
+          if (moveLength > 0) {
+            this.movementDirection.x /= moveLength;
+            this.movementDirection.y /= moveLength;
+          }
+          
+          // Update aim target to be in the direction of movement
+          const aimDistance = 100; // How far ahead to aim
+          this.aimTarget.x = this.ship.x + this.movementDirection.x * aimDistance;
+          this.aimTarget.y = this.ship.y + this.movementDirection.y * aimDistance;
+        } else {
+          // If no input, gradually slow down
+          this.movementDirection.x *= 0.95;
+          this.movementDirection.y *= 0.95;
         }
-        
-        // Update aim target to be in the direction of movement
-        const aimDistance = 100; // How far ahead to aim
-        this.aimTarget.x = this.ship.x + this.movementDirection.x * aimDistance;
-        this.aimTarget.y = this.ship.y + this.movementDirection.y * aimDistance;
-      } else {
-        // If no input, gradually slow down
-        this.movementDirection.x *= 0.95;
-        this.movementDirection.y *= 0.95;
       }
       
       // Update predicted position based on movement direction
-      this.predictedState.x += this.movementDirection.x * shipSpeed * dt;
-      this.predictedState.y += this.movementDirection.y * shipSpeed * dt;
+      this.predictedState.x += this.targetDirection.x * shipSpeed * dt;
+      this.predictedState.y += this.targetDirection.y * shipSpeed * dt;
     }
     
     // Server reconciliation - smoothly correct client prediction errors
@@ -1155,7 +1183,7 @@ class MainScene extends Phaser.Scene {
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
     
-    // Update ship rotation to match movement direction
+    // Update ship rotation to match aim direction
     if (this.movementDirection.x !== 0 || this.movementDirection.y !== 0) {
       const angle = Math.atan2(this.movementDirection.y, this.movementDirection.x);
       this.ship.rotation = angle;
@@ -1163,12 +1191,12 @@ class MainScene extends Phaser.Scene {
     
     // Update direction indicator
     this.directionIndicator.clear();
-    this.directionIndicator.lineStyle(2, 0xffffff, 1);
+    this.directionIndicator.lineStyle(3, 0xffffff, 0.8);
     this.directionIndicator.beginPath();
     this.directionIndicator.moveTo(this.ship.x, this.ship.y);
     this.directionIndicator.lineTo(
-      this.ship.x + this.movementDirection.x * 30,
-      this.ship.y + this.movementDirection.y * 30
+      this.ship.x + this.movementDirection.x * 40,
+      this.ship.y + this.movementDirection.y * 40
     );
     this.directionIndicator.closePath();
     this.directionIndicator.strokePath();
