@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Multiplayer Game</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #121212;
+      color: #ffffff;
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      width: 100vw;
+      overflow-x: hidden;
+    }
+    
+    h1 {
+      font-size: 2.5em;
+      margin-bottom: 20px;
+      color: #4caf50;
+      text-align: center;
+    }
+    
+    .buttons {
+      display: flex;
+      gap: 20px;
+      justify-content: center;
+      width: 100%;
+    }
+    
+    button {
+      background-color: #4caf50;
+      color: white;
+      border: none;
+      padding: 15px 30px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 1.2em;
+      transition: background-color 0.3s;
+    }
+    
+    button:hover {
+      background-color: #3e8e41;
+    }
+    
+    #loading-message {
+      margin-top: 20px;
+      font-size: 1.2em;
+      color: #4caf50;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>Multiplayer Game</h1>
+  <div class="buttons" id="button-container">
+    <button id="lobby-button" onclick="window.location.href='lobby.html'">Enter Lobby</button>
+    <button id="quick-play-button" onclick="window.location.href='game.html'">Quick Play</button>
+  </div>
+  <div id="loading-message">Loading game...</div>
+  
+  <script>
+    console.log('Index page loaded');
+    
+    // Check if we're on itch.io or another hosting platform
+    function isOnItchIo() {
+      return window.location.hostname.includes('itch.io') || 
+             window.location.hostname.includes('itchio') ||
+             window.location.hostname.includes('hwcdn.net');
+    }
+    
+    // Function to redirect to lobby after a short delay
+    function redirectToLobby() {
+      document.getElementById('button-container').style.display = 'none';
+      document.getElementById('loading-message').style.display = 'block';
+      
+      console.log('Redirecting to lobby.html...');
+      setTimeout(function() {
+        window.location.href = 'lobby.html';
+      }, 1500);
+    }
+    
+    // If we're on itch.io, automatically redirect to the lobby
+    if (isOnItchIo()) {
+      console.log('Detected itch.io hosting environment');
+      redirectToLobby();
+    }
+  </script>
+</body>
+</html>
