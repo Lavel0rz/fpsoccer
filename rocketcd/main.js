@@ -1415,16 +1415,21 @@ class MainScene extends Phaser.Scene {
               if (this.otherShips[id].nameText) {
                 this.otherShips[id].nameText.destroy();
               }
-              this.otherShips[id].destroy();
-              delete this.otherShips[id];
               
-              // Clean up rocket cooldown graphics
+              // Clean up rocket cooldown graphics and text
               if (this.otherShips[id].rocketCooldownGraphics) {
                 this.otherShips[id].rocketCooldownGraphics.destroy();
               }
               if (this.otherShips[id].rocketReadyText) {
+                // Stop any active tween before destroying
+                if (this.otherShips[id].rocketReadyTween && this.otherShips[id].rocketReadyTween.isPlaying()) {
+                  this.otherShips[id].rocketReadyTween.stop();
+                }
                 this.otherShips[id].rocketReadyText.destroy();
               }
+              
+              this.otherShips[id].destroy();
+              delete this.otherShips[id];
             }
           }
         }
@@ -1905,12 +1910,36 @@ class MainScene extends Phaser.Scene {
       if (this.otherShips[id].nameText) {
         this.otherShips[id].nameText.destroy();
       }
+      
+      // Clean up rocket cooldown indicators
+      if (this.otherShips[id].rocketCooldownGraphics) {
+        this.otherShips[id].rocketCooldownGraphics.destroy();
+      }
+      if (this.otherShips[id].rocketReadyText) {
+        // Stop any active tween before destroying
+        if (this.otherShips[id].rocketReadyTween && this.otherShips[id].rocketReadyTween.isPlaying()) {
+          this.otherShips[id].rocketReadyTween.stop();
+        }
+        this.otherShips[id].rocketReadyText.destroy();
+      }
+      
       this.otherShips[id].destroy();
     }
     
     // Clean up player name text
     if (this.playerNameText) {
       this.playerNameText.destroy();
+    }
+    
+    // Clean up player's rocket cooldown indicators
+    if (this.rocketCooldownGraphics) {
+      this.rocketCooldownGraphics.destroy();
+    }
+    if (this.rocketReadyText) {
+      if (this.rocketReadyTween && this.rocketReadyTween.isPlaying()) {
+        this.rocketReadyTween.stop();
+      }
+      this.rocketReadyText.destroy();
     }
     
     // Clean up UI elements
