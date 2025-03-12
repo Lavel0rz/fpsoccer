@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Game Lobby</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background-color: #121212;
+      color: #ffffff;
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      width: 100vw;
+      box-sizing: border-box;
+      overflow-x: hidden;
+    }
+    
+    .container {
+      width: 100%;
+      max-width: 800px;
+      background-color: #1e1e1e;
+      border-radius: 8px;
+      padding: 20px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+      margin: 0 auto;
+    }
+    
+    h1 {
+      text-align: center;
+      color: #4caf50;
+      margin-bottom: 30px;
+    }
+    
+    .section {
+      margin-bottom: 30px;
+      padding: 15px;
+      background-color: #2a2a2a;
+      border-radius: 5px;
+    }
+    
+    .section-title {
+      font-size: 1.2em;
+      margin-bottom: 15px;
+      color: #4caf50;
+    }
+    
+    button {
+      background-color: #4caf50;
+      color: white;
+      border: none;
+      padding: 10px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 1em;
+      margin: 5px;
+      transition: background-color 0.3s;
+    }
+    
+    button:hover {
+      background-color: #3e8e41;
+    }
+    
+    button:disabled {
+      background-color: #555555;
+      cursor: not-allowed;
+    }
+    
+    input, select {
+      padding: 8px;
+      margin: 5px;
+      border-radius: 4px;
+      border: 1px solid #555;
+      background-color: #333;
+      color: white;
+      width: calc(100% - 20px);
+    }
+    
+    .game-list {
+      list-style-type: none;
+      padding: 0;
+    }
+    
+    .game-item {
+      padding: 10px;
+      margin-bottom: 8px;
+      background-color: #333;
+      border-radius: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .game-info {
+      flex-grow: 1;
+    }
+    
+    .status {
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+      background-color: #333;
+    }
+    
+    .error {
+      background-color: #ff5252;
+      color: white;
+    }
+    
+    .success {
+      background-color: #4caf50;
+      color: white;
+    }
+    
+    .loading {
+      background-color: #2196F3;
+      color: white;
+    }
+    
+    .quick-play {
+      text-align: center;
+      margin-top: 20px;
+    }
+    
+    .quick-play button {
+      padding: 12px 24px;
+      font-size: 1.1em;
+    }
+    
+    .checkbox-container {
+      display: flex;
+      align-items: center;
+      margin: 10px 0;
+    }
+    
+    .checkbox-container input[type="checkbox"] {
+      width: auto;
+      margin-right: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Game Lobby</h1>
+    
+    <div class="section">
+      <div class="section-title">Connection Status</div>
+      <div id="connection-status" class="status">Disconnected</div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">Create Game</div>
+      <div>
+        <input type="text" id="display-name" placeholder="Your Display Name" />
+        <input type="text" id="game-name" placeholder="Game Name" />
+        <select id="max-players">
+          <option value="2">2 Players</option>
+          <option value="4">4 Players</option>
+          <option value="6">6 Players</option>
+          <option value="8">8 Players</option>
+        </select>
+        <div class="checkbox-container">
+          <input type="checkbox" id="is-public" checked />
+          <label for="is-public">Public Game (visible to other players)</label>
+        </div>
+        <button id="create-game-btn">Create Game</button>
+      </div>
+    </div>
+    
+    <div class="section">
+      <div class="section-title">Available Games</div>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <span id="games-count">No games available</span>
+        <button id="refresh-games-btn">Refresh Games</button>
+      </div>
+      <ul id="game-list" class="game-list">
+        <li class="game-item">
+          <div class="game-info">No games available</div>
+        </li>
+      </ul>
+    </div>
+    
+    <div class="quick-play">
+      <button id="quick-play-btn">Quick Play</button>
+    </div>
+  </div>
+  
+  <script>
+    // Global variables
+    let socket = null;
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
+    let pingInterval = null;
+    const maxReconnectAttempts = 5;
+    let lastPingTime = 0;
+    let lastPongTime = 0;
+    let connectionLost = false;
+    let debugMode = true; // Enable debug logging
+    
+    // Debug logging function
+    function debugLog(...args) {
+      if (debugMode) {
+        console.log(`[${new Date().toISOString()}]`, ...args);
+      }
+    }
+    
+    // Detect if we're on itch.io
+    function isItchIo() {
+      return window.location.hostname.includes('itch.io') || 
+             window.location.hostname.includes('itchio') ||
+             window.location.hostname.includes('hwcdn.net');
+    }
+    
+    // Detect if we're on a mobile browser
+    function isMobileBrowser() {
+      const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      if (mobile) {
+        debugLog('Mobile browser detected');
+      }
+      return mobile;
+    }
+    
+    // DOM elements
+    const connectionStatus = document.getElementById('connection-status');
+    const createGameBtn = document.getElementById('create-game-btn');
+    const refreshGamesBtn = document.getElementById('refresh-games-btn');
+    const gameList = document.getElementById('game-list');
+    const gameNameInput = document.getElementById('game-name');
+    const maxPlayersSelect = document.getElementById('max-players');
+    const isPublicCheckbox = document.getElementById('is-public');
+    const gamesCount = document.getElementById('games-count');
+    
+    // Add a debug panel for mobile
+    if (isMobileBrowser()) {
+      const debugPanel = document.createElement('div');
+      debugPanel.id = 'debug-panel';
+      debugPanel.style.position = 'fixed';
+      debugPanel.style.bottom = '10px';
+      debugPanel.style.left = '10px';
+      debugPanel.style.right = '10px';
+      debugPanel.style.backgroundColor = 'rgba(0,0,0,0.8)';
+      debugPanel.style.color = 'white';
+      debugPanel.style.padding = '10px';
+      debugPanel.style.borderRadius = '5px';
+      debugPanel.style.fontSize = '12px';
+      debugPanel.style.maxHeight = '150px';
+      debugPanel.style.overflow = 'auto';
+      debugPanel.style.zIndex = '1000';
+      debugPanel.innerHTML = '<div>Debug Panel</div><div id="debug-log"></div>';
+      document.body.appendChild(debugPanel);
+      
+      // Add a manual reconnect button
+      const reconnectBtn = document.createElement('button');
+      reconnectBtn.textContent = 'Force Reconnect';
+      reconnectBtn.style.marginTop = '10px';
+      reconnectBtn.addEventListener('click', () => {
+        debugLog('Manual reconnect triggered');
+        connectToLobby();
+      });
+      debugPanel.appendChild(reconnectBtn);
+      
+      // Override console.log for mobile debugging
+      const originalLog = console.log;
+      console.log = function(...args) {
+        originalLog.apply(console, args);
+        const debugLog = document.getElementById('debug-log');
+        if (debugLog) {
+          const message = args.map(arg => 
+            typeof arg === 'object' ? JSON.stringify(arg) : arg
+          ).join(' ');
+          const logEntry = document.createElement('div');
+          logEntry.textContent = `${new Date().toLocaleTimeString()}: ${message}`;
+          debugLog.appendChild(logEntry);
+          
+          // Keep only the last 20 log entries
+          while (debugLog.children.length > 20) {
+            debugLog.removeChild(debugLog.firstChild);
+          }
+          
+          // Scroll to bottom
+          debugLog.scrollTop = debugLog.scrollHeight;
+        }
+      };
+    }
+    
+    // Connect to the lobby server
+    function connectToLobby() {
+      debugLog('Connecting to lobby server...');
+      connectionStatus.textContent = 'Connecting...';
+      connectionStatus.className = 'status loading';
+      
+      // Clear existing connection if any
+      if (socket) {
+        debugLog('Closing existing socket');
+        socket.close();
+      }
+      
+      // Clear any existing ping interval
+      if (pingInterval) {
+        debugLog('Clearing existing ping interval');
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
+      
+      // Create a new WebSocket connection
+      let wsUrl = 'wss://towerup.io/lobby';
+      
+      debugLog('Connecting to WebSocket at:', wsUrl);
+      
+      try {
+        socket = new WebSocket(wsUrl);
+      } catch (error) {
+        debugLog('Error creating WebSocket:', error);
+        connectionStatus.textContent = 'Failed to create connection';
+        connectionStatus.className = 'status error';
+        return;
+      }
+      
+      // Reset connection state
+      connectionLost = false;
+      lastPingTime = 0;
+      lastPongTime = 0;
+      
+      // Set a connection timeout
+      const connectionTimeout = setTimeout(() => {
+        if (socket && socket.readyState !== WebSocket.OPEN) {
+          debugLog('WebSocket connection timeout');
+          socket.close();
+        }
+      }, 10000);
+      
+      // Connection opened
+      socket.addEventListener('open', () => {
+        debugLog('WebSocket connection opened successfully');
+        clearTimeout(connectionTimeout);
+        connectionStatus.textContent = 'Connected to lobby server';
+        connectionStatus.className = 'status success';
+        reconnectAttempts = 0;
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        
+        // Enable buttons
+        createGameBtn.disabled = false;
+        refreshGamesBtn.disabled = false;
+        
+        // Request the list of available games
+        refreshGameList();
+        
+        // Start sending regular pings to keep the connection alive
+        const pingFrequency = isMobileBrowser() ? 2000 : 15000; // More frequent pings for mobile
+        debugLog(`Setting up ping interval every ${pingFrequency}ms`);
+        
+        pingInterval = setInterval(() => {
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            // Check if we've received a pong since our last ping
+            const now = Date.now();
+            if (lastPingTime > 0 && lastPongTime < lastPingTime && now - lastPingTime > 10000) {
+              debugLog('No pong received for last ping, connection may be dead');
+              if (!connectionLost) {
+                connectionLost = true;
+                // Force reconnect
+                debugLog('Forcing reconnect due to missing pong');
+                socket.close();
+                connectToLobby();
+                return;
+              }
+            }
+            
+            // Send a ping message
+            lastPingTime = now;
+            try {
+              socket.send(JSON.stringify({ type: "ping", timestamp: now }));
+              debugLog('Sent ping to server');
+            } catch (e) {
+              debugLog('Error sending ping:', e);
+            }
+          }
+        }, pingFrequency);
+        
+        // Send an initial ping
+        lastPingTime = Date.now();
+        socket.send(JSON.stringify({ type: "ping", timestamp: lastPingTime }));
+        debugLog('Sent initial ping to server');
+      });
+      
+      // Listen for messages
+      socket.addEventListener('message', (event) => {
+        try {
+          debugLog('Received message:', event.data.substring(0, 100) + (event.data.length > 100 ? '...' : ''));
+          
+          // Handle simple ping-pong for connection testing
+          if (event.data === 'pong' || event.data === 'ping') {
+            debugLog('Received ping/pong from server');
+            lastPongTime = Date.now();
+            return;
+          }
+          
+          // Handle connected message
+          if (event.data === 'connected') {
+            debugLog('Received connected confirmation from server');
+            return;
+          }
+          
+          // Try to parse as JSON
+          try {
+            const message = JSON.parse(event.data);
+            
+            // Handle ping response
+            if (message.type === "pong") {
+              debugLog('Received pong from server');
+              lastPongTime = Date.now();
+              return;
+            }
+            
+            // Handle heartbeat
+            if (message.type === "heartbeat") {
+              debugLog('Received heartbeat from server');
+              // Send a ping back to acknowledge
+              socket.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
+              return;
+            }
+            
+            handleLobbyMessage(message);
+          } catch (jsonError) {
+            debugLog('Received non-JSON message:', event.data);
+          }
+        } catch (error) {
+          debugLog('Error handling message:', error);
+          showNotification('Error handling server message', true);
+        }
+      });
+      
+      // Connection closed
+      socket.addEventListener('close', (event) => {
+        debugLog('WebSocket connection closed', event.code, event.reason);
+        clearTimeout(connectionTimeout);
+        
+        // Clear ping interval
+        if (pingInterval) {
+          clearInterval(pingInterval);
+          pingInterval = null;
+        }
+        
+        connectionStatus.textContent = 'Disconnected from lobby server';
+        connectionStatus.className = 'status error';
+        
+        // Disable buttons
+        createGameBtn.disabled = true;
+        refreshGamesBtn.disabled = true;
+        
+        // Don't reconnect if the close was clean and intentional
+        if (event.wasClean && (event.code === 1000 || event.code === 1001)) {
+          debugLog('Clean connection close, not reconnecting');
+          return;
+        }
+        
+        // Try to reconnect
+        if (reconnectAttempts < maxReconnectAttempts) {
+          reconnectAttempts++;
+          const delay = isMobileBrowser() ? 1000 * reconnectAttempts : 2000 * reconnectAttempts;
+          debugLog(`Will reconnect in ${delay}ms (attempt ${reconnectAttempts})`);
+          showNotification(`Connection lost. Reconnecting in ${delay/1000} seconds...`, true);
+          reconnectTimer = setTimeout(connectToLobby, delay);
+        } else {
+          debugLog('Max reconnect attempts reached');
+          showNotification('Could not reconnect to server. Please refresh the page.', true);
+        }
+      });
+      
+      // Connection error
+      socket.addEventListener('error', (error) => {
+        debugLog('WebSocket error:', error);
+        connectionStatus.textContent = 'Connection error';
+        connectionStatus.className = 'status error';
+      });
+    }
+    
+    // Handle messages from the lobby server
+    function handleLobbyMessage(message) {
+      console.log('Received message:', message);
+      
+      switch (message.type) {
+        case 'game_list':
+          updateGameList(message.games);
+          break;
+          
+        case 'game_created':
+          showNotification(`Game created! Redirecting to game...`);
+          // Redirect to the game page with the game ID and port
+          setTimeout(() => {
+            window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}`;
+          }, 1000);
+          break;
+          
+        case 'game_joined':
+          showNotification(`Joined game! Redirecting...`);
+          // Redirect to the game page with the game ID and port
+          setTimeout(() => {
+            window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}`;
+          }, 1000);
+          break;
+          
+        case 'error':
+          showNotification(message.message, true);
+          break;
+      }
+    }
+    
+    // Update the game list
+    function updateGameList(games) {
+      // Clear the current list
+      gameList.innerHTML = '';
+      
+      if (games.length === 0) {
+        gameList.innerHTML = '<li class="game-item"><div class="game-info">No games available</div></li>';
+        gamesCount.textContent = 'No games available';
+        return;
+      }
+      
+      gamesCount.textContent = `${games.length} game${games.length > 1 ? 's' : ''} available`;
+      
+      // Add each game to the list
+      games.forEach(game => {
+        const gameItem = document.createElement('li');
+        gameItem.className = 'game-item';
+        
+        const gameInfo = document.createElement('div');
+        gameInfo.className = 'game-info';
+        gameInfo.textContent = `${game.name} (${game.player_count}/${game.max_players} players)`;
+        
+        const joinButton = document.createElement('button');
+        joinButton.textContent = 'Join Game';
+        joinButton.addEventListener('click', () => {
+          joinButton.disabled = true;
+          joinButton.textContent = 'Joining...';
+          joinGame(game.id);
+        });
+        
+        gameItem.appendChild(gameInfo);
+        gameItem.appendChild(joinButton);
+        gameList.appendChild(gameItem);
+      });
+    }
+    
+    // Create a new game
+    function createGame() {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        showNotification('Not connected to lobby server', true);
+        return;
+      }
+      
+      const gameName = gameNameInput.value.trim();
+      const displayName = document.getElementById('display-name').value.trim() || "Player";
+      
+      if (!gameName) {
+        showNotification('Please enter a game name', true);
+        return;
+      }
+      
+      const maxPlayers = parseInt(maxPlayersSelect.value);
+      const isPublic = isPublicCheckbox.checked;
+      
+      // Save display name to localStorage for future use
+      localStorage.setItem('playerDisplayName', displayName);
+      
+      // Disable the create button and show loading state
+      createGameBtn.disabled = true;
+      createGameBtn.textContent = 'Creating...';
+      
+      const createGameMsg = {
+        type: "create_game",
+        name: gameName,
+        max_players: maxPlayers,
+        is_public: isPublic,
+        display_name: displayName
+      };
+      
+      socket.send(JSON.stringify(createGameMsg));
+      
+      // Show notification
+      showNotification('Creating game...', false, 'loading');
+    }
+    
+    // Join a game
+    function joinGame(gameId) {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        showNotification('Not connected to lobby server', true);
+        return;
+      }
+      
+      const displayName = document.getElementById('display-name').value.trim() || "Player";
+      
+      // Save display name to localStorage for future use
+      localStorage.setItem('playerDisplayName', displayName);
+      
+      const joinGameMsg = {
+        type: "join_game",
+        game_id: gameId,
+        display_name: displayName
+      };
+      
+      socket.send(JSON.stringify(joinGameMsg));
+      
+      // Show notification
+      showNotification('Joining game...', false, 'loading');
+    }
+    
+    // Refresh the game list
+    function refreshGameList() {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        showNotification('Not connected to lobby server', true);
+        return;
+      }
+      
+      // Update button state
+      refreshGamesBtn.disabled = true;
+      refreshGamesBtn.textContent = 'Refreshing...';
+      
+      const message = {
+        type: 'list_games'
+      };
+      
+      socket.send(JSON.stringify(message));
+      
+      // Reset button after a short delay
+      setTimeout(() => {
+        refreshGamesBtn.disabled = false;
+        refreshGamesBtn.textContent = 'Refresh Games';
+      }, 1000);
+    }
+    
+    // Show a notification
+    function showNotification(message, isError = false, className = null) {
+      const notification = document.createElement('div');
+      notification.textContent = message;
+      notification.className = className ? `status ${className}` : (isError ? 'status error' : 'status success');
+      
+      // Insert after connection status
+      connectionStatus.parentNode.insertBefore(notification, connectionStatus.nextSibling);
+      
+      // Remove after 5 seconds
+      setTimeout(() => {
+        notification.remove();
+      }, 5000);
+    }
+    
+    // Initialize the page
+    function init() {
+      // Load saved display name if available
+      const savedDisplayName = localStorage.getItem('playerDisplayName');
+      if (savedDisplayName) {
+        document.getElementById('display-name').value = savedDisplayName;
+      }
+      
+      connectToLobby();
+      
+      createGameBtn.addEventListener('click', createGame);
+      refreshGamesBtn.addEventListener('click', refreshGameList);
+      
+      // Add quick play button handler
+      document.getElementById('quick-play-btn').addEventListener('click', function() {
+        const displayName = document.getElementById('display-name').value.trim() || "Player";
+        localStorage.setItem('playerDisplayName', displayName);
+        window.location.href = `game.html?display_name=${encodeURIComponent(displayName)}`;
+      });
+    }
+    
+    // Connect to the lobby server when the page loads
+    window.addEventListener('load', init);
+  </script>
+</body>
+</html> 
