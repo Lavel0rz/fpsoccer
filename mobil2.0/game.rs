@@ -415,6 +415,8 @@ impl Game {
         let collision_radius = 20.0;
         let player_ids: Vec<u32> = self.players.keys().cloned().collect();
         let mut adjustments: HashMap<u32, (f32, f32)> = HashMap::new();
+        let mut velocity_changes: HashMap<u32, (f32, f32)> = HashMap::new();
+        
         for i in 0..player_ids.len() {
             for j in (i + 1)..player_ids.len() {
                 let id_i = player_ids[i];
@@ -425,11 +427,45 @@ impl Game {
                 let dy = yi - yj;
                 let dist = (dx * dx + dy * dy).sqrt();
                 if dist < collision_radius * 2.0 {
+                    // Calculate collision normal
                     let overlap = collision_radius * 2.0 - dist;
                     let (nx, ny) = if dist > 0.0 { (dx / dist, dy / dist) } else { (1.0, 0.0) };
-                    let adjustment = (nx * overlap / 2.0, ny * overlap / 2.0);
+                    
+                    // Increase the collision force by using a multiplier
+                    let collision_force = 1.5; // Increase this value for more bumpiness
+                    let adjustment = (nx * overlap / 2.0 * collision_force, ny * overlap / 2.0 * collision_force);
+                    
+                    // Apply position adjustments
                     adjustments.entry(id_i).and_modify(|e| { e.0 += adjustment.0; e.1 += adjustment.1; }).or_insert(adjustment);
                     adjustments.entry(id_j).and_modify(|e| { e.0 -= adjustment.0; e.1 -= adjustment.1; }).or_insert((-adjustment.0, -adjustment.1));
+                    
+                    // Get player velocities
+                    let (vxi, vyi) = self.players[&id_i].velocity;
+                    let (vxj, vyj) = self.players[&id_j].velocity;
+                    
+                    // Calculate relative velocity
+                    let rvx = vxi - vxj;
+                    let rvy = vyi - vyj;
+                    
+                    // Calculate velocity along the normal
+                    let velocity_along_normal = rvx * nx + rvy * ny;
+                    
+                    // Only resolve if objects are moving toward each other
+                    if velocity_along_normal < 0.0 {
+                        // Calculate restitution (bounciness)
+                        let restitution = 0.6; // Higher values make collisions more bouncy
+                        
+                        // Calculate impulse scalar
+                        let impulse_scalar = -(1.0 + restitution) * velocity_along_normal;
+                        
+                        // Apply impulse to velocities
+                        let impulse_x = impulse_scalar * nx;
+                        let impulse_y = impulse_scalar * ny;
+                        
+                        // Store velocity changes
+                        velocity_changes.entry(id_i).and_modify(|e| { e.0 += impulse_x; e.1 += impulse_y; }).or_insert((impulse_x, impulse_y));
+                        velocity_changes.entry(id_j).and_modify(|e| { e.0 -= impulse_x; e.1 -= impulse_y; }).or_insert((-impulse_x, -impulse_y));
+                    }
 
                     if self.ball.grabbed {
                         if let Some(owner_id) = self.ball.owner {
@@ -456,10 +492,20 @@ impl Game {
                 }
             }
         }
+        
+        // Apply position adjustments
         for (id, (dx, dy)) in adjustments {
             if let Some(player) = self.players.get_mut(&id) {
                 player.ship.x += dx;
                 player.ship.y += dy;
+            }
+        }
+        
+        // Apply velocity changes
+        for (id, (dvx, dvy)) in velocity_changes {
+            if let Some(player) = self.players.get_mut(&id) {
+                player.velocity.0 += dvx;
+                player.velocity.1 += dvy;
             }
         }
 
