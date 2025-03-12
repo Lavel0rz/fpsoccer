@@ -814,6 +814,13 @@ class MainScene extends Phaser.Scene {
             return;
           }
           
+          // Handle ball knocked loose message
+          if (msg.type === 'ball_knocked') {
+            // Play ball knocked loose effect
+            this.playBallKnockedEffect(msg.player_id);
+            return;
+          }
+          
           // If we got here, it's a game state update
           this.incomingBuffer.push(event.data);
         } catch (jsonError) {
@@ -1125,8 +1132,8 @@ class MainScene extends Phaser.Scene {
       
       // For desktop, we don't update the movement direction from keyboard input
       // since it's now controlled by the mouse position
-      if (this.isMobile || this.controllerConnected) {
-        // Gradually turn towards the target direction (for mobile and controller)
+      if (this.isMobile) {
+        // Gradually turn towards the target direction (for mobile only)
         if (targetLength > 0) {
           // Interpolate current direction towards target direction
           this.movementDirection.x = Phaser.Math.Linear(this.movementDirection.x, this.targetDirection.x, this.turnSpeed);
@@ -1812,6 +1819,71 @@ class MainScene extends Phaser.Scene {
     }
   }
 
+  // Add method to play ball knocked effect
+  playBallKnockedEffect(playerId) {
+    // Find the ship that had the ball knocked loose
+    let knockedShip;
+    if (playerId === this.clientId) {
+      knockedShip = this.ship;
+    } else if (this.otherShips[playerId]) {
+      knockedShip = this.otherShips[playerId];
+    }
+    
+    if (!knockedShip) return;
+    
+    // Create a flash effect
+    const flash = this.add.circle(knockedShip.x, knockedShip.y, 40, 0xff0000, 0.6);
+    flash.setDepth(10);
+    
+    // Fade out and destroy
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      duration: 300,
+      onComplete: () => {
+        flash.destroy();
+      }
+    });
+    
+    // Add some particles to show the ball being knocked loose
+    if (this.particleEmitter) {
+      for (let i = 0; i < 20; i++) {
+        // Emit particles in random directions
+        const angle = Math.random() * Math.PI * 2;
+        const distance = 30 + Math.random() * 20;
+        const x = knockedShip.x + Math.cos(angle) * distance;
+        const y = knockedShip.y + Math.sin(angle) * distance;
+        
+        this.particleEmitter.emitParticleAt(x, y);
+      }
+    }
+    
+    // Show a text notification
+    const text = this.add.text(
+      knockedShip.x, 
+      knockedShip.y - 60, 
+      'BALL KNOCKED LOOSE!', 
+      { 
+        fontFamily: 'Arial', 
+        fontSize: 16, 
+        color: '#ffffff',
+        stroke: '#000000',
+        strokeThickness: 3
+      }
+    ).setOrigin(0.5);
+    
+    // Animate the text upward and fade it out
+    this.tweens.add({
+      targets: text,
+      y: text.y - 30,
+      alpha: 0,
+      duration: 1000,
+      onComplete: () => {
+        text.destroy();
+      }
+    });
+  }
+
   setupControllerSupport() {
     console.log('Setting up controller support');
     
@@ -1952,6 +2024,8 @@ class MainScene extends Phaser.Scene {
           this.movementDirection.x = rightX / mag;
           this.movementDirection.y = rightY / mag;
         }
+        
+        // Send updated input with new aim target
       }
     }
   }

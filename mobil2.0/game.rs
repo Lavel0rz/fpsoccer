@@ -477,15 +477,43 @@ impl Game {
                                 self.ball.grabbed = false;
                                 self.ball.owner = None;
                                 
-                                // Apply grab cooldown to both colliding players
+                                // Apply longer grab cooldown to the player who had the ball
+                                // and a shorter cooldown to the other player to make it easier to steal
                                 if let Some(player) = self.players.get_mut(&id_i) {
-                                    player.grab_cooldown = 0.3;
+                                    if owner_id == id_i {
+                                        // Longer cooldown for the player who had the ball
+                                        player.grab_cooldown = 0.8; // Increased from 0.3
+                                    } else {
+                                        // Shorter cooldown for the player who didn't have the ball
+                                        player.grab_cooldown = 0.1; // Decreased from 0.3
+                                    }
                                 }
                                 if let Some(player) = self.players.get_mut(&id_j) {
-                                    player.grab_cooldown = 0.3;
+                                    if owner_id == id_j {
+                                        // Longer cooldown for the player who had the ball
+                                        player.grab_cooldown = 0.8; // Increased from 0.3
+                                    } else {
+                                        // Shorter cooldown for the player who didn't have the ball
+                                        player.grab_cooldown = 0.1; // Decreased from 0.3
+                                    }
                                 }
                                 
                                 self.ball.last_shooter = None;
+                                
+                                // Send a message to all clients about the ball being knocked loose
+                                let knock_event = json!({
+                                    "type": "ball_knocked",
+                                    "player_id": owner_id
+                                });
+                                
+                                let knock_str = knock_event.to_string();
+                                for (_id, sender) in self.clients.iter_mut() {
+                                    let msg = knock_str.clone();
+                                    let sender = Arc::clone(sender);
+                                    tokio::spawn(async move {
+                                        let _ = sender.lock().await.send(Message::text(msg)).await;
+                                    });
+                                }
                             }
                         }
                     }
@@ -519,7 +547,7 @@ impl Game {
             if !self.ball.grabbed {
                 let ship_radius = 20.0;
                 let ball_radius = 10.0;
-                let grab_radius = ship_radius + ball_radius + 5.0; // Reduced grab radius to prevent grabbing through obstacles
+                let grab_radius = ship_radius + ball_radius; // Removed the +5.0 buffer to make grab radius match ship size
                 let grab_radius_squared = grab_radius * grab_radius;
                 
                 let mut closest_id: Option<u32> = None;
