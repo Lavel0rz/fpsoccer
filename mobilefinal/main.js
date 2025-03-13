@@ -167,15 +167,25 @@ class MainScene extends Phaser.Scene {
   
   // Detect if we're on a mobile device
   detectMobile() {
-    return (
-      navigator.userAgent.match(/Android/i) ||
-      navigator.userAgent.match(/webOS/i) ||
-      navigator.userAgent.match(/iPhone/i) ||
-      navigator.userAgent.match(/iPad/i) ||
-      navigator.userAgent.match(/iPod/i) ||
-      navigator.userAgent.match(/BlackBerry/i) ||
-      navigator.userAgent.match(/Windows Phone/i)
+    // Check if the device has touch capabilities
+    const hasTouchCapabilities = (
+      'ontouchstart' in window || 
+      navigator.maxTouchPoints > 0 || 
+      navigator.msMaxTouchPoints > 0
     );
+    
+    // Log detection info for debugging
+    console.log('Device detection:', {
+      hasTouchCapabilities,
+      maxTouchPoints: navigator.maxTouchPoints || 0,
+      msMaxTouchPoints: navigator.msMaxTouchPoints || 0,
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      screenSize: `${window.innerWidth}x${window.innerHeight}`
+    });
+    
+    // If the device has touch capabilities, use mobile controls
+    return hasTouchCapabilities;
   }
   
   preload() {
@@ -198,6 +208,10 @@ class MainScene extends Phaser.Scene {
     const width = this.scale.width;
     const height = this.scale.height;
     console.log(`Initial game size: ${width} x ${height}`);
+    
+    // Check if we're on a mobile device and log it
+    this.isMobile = this.detectMobile();
+    console.log(`Device detected as ${this.isMobile ? 'mobile/touch' : 'desktop'}`);
     
     // Add resize event listener
     this.scale.on('resize', this.handleResize, this);
@@ -523,55 +537,9 @@ class MainScene extends Phaser.Scene {
     const buttonSize = Math.min(20, Math.max(12, width * 0.025)); // Even smaller buttons
     const buttonPadding = Math.min(70, Math.max(30, height * 0.07)); // Keep same padding
     
-    // Create a boost button for projectile firing - fixed position with more separation
-    this.boostButton = this.add.circle(
-      width - buttonPadding,
-      height - (buttonPadding * 3.5), // Increased vertical separation
-      buttonSize,
-      0xff9900,
-      0.8
-    );
-    this.boostButton.setScrollFactor(0); // Keep fixed on screen
-    this.boostButton.setDepth(1000); // Ensure it's on top
-    this.boostButton.setInteractive();
-    
-    // Use direct event listeners instead of Phaser's event system
-    this.boostButton.on('pointerdown', () => {
-      console.log('Boost button pressed - firing projectile');
-      this.inputState.boost = true;
-      this.sendInput();
-      
-      // Show visual feedback for projectile firing
-      this.showNotification("Firing projectile!", false);
-    });
-    
-    this.boostButton.on('pointerout', () => {
-      if (this.inputState.boost) {
-        this.inputState.boost = false;
-        this.sendInput();
-      }
-    });
-    
-    this.boostButton.on('pointerup', () => {
-      if (this.inputState.boost) {
-        this.inputState.boost = false;
-        this.sendInput();
-      }
-    });
-    
-    // Add text to the boost button
-    const boostText = this.add.text(
-      width - buttonPadding,
-      height - (buttonPadding * 3.5), // Match the button position
-      'FIRE',
-      { fontSize: Math.max(6, Math.min(10, width * 0.006)), color: '#ffffff' } // Smaller font
-    ).setOrigin(0.5);
-    boostText.setScrollFactor(0); // Keep fixed on screen
-    boostText.setDepth(1001); // Ensure it's on top of the button
-    
-    // Create a shoot button - fixed position with horizontal separation
+    // Create a shoot button - fixed position
     this.shootButton = this.add.circle(
-      width - (buttonPadding * 2.5), // Horizontal separation
+      width - buttonPadding,
       height - buttonPadding,
       buttonSize,
       0xff0000,
@@ -582,8 +550,11 @@ class MainScene extends Phaser.Scene {
     this.shootButton.setInteractive();
     
     // Use direct event listeners instead of Phaser's event system
-    this.shootButton.on('pointerdown', () => {
+    this.shootButton.on('pointerdown', (pointer) => {
       console.log('Shoot button pressed');
+      // Stop event propagation to prevent firing rockets
+      pointer.event.stopPropagation();
+      
       this.inputState.shoot = true;
       this.sendInput();
       // Reset shoot flag after a short delay
@@ -595,7 +566,7 @@ class MainScene extends Phaser.Scene {
     
     // Add text to the shoot button
     const shootText = this.add.text(
-      width - (buttonPadding * 2.5), // Match the button position
+      width - buttonPadding,
       height - buttonPadding,
       'SHOOT',
       { fontSize: Math.max(6, Math.min(10, width * 0.006)), color: '#ffffff' } // Smaller font
@@ -603,19 +574,37 @@ class MainScene extends Phaser.Scene {
     shootText.setScrollFactor(0); // Keep fixed on screen
     shootText.setDepth(1001); // Ensure it's on top of the button
     
-    // COMPLETELY SEPARATE JOYSTICK HANDLING
-    // Create a dedicated input zone for the left side of the screen for joystick
-    const leftHalfZone = this.add.zone(0, 0, width / 2, height);
-    leftHalfZone.setOrigin(0, 0);
-    leftHalfZone.setScrollFactor(0);
-    leftHalfZone.setInteractive();
+    // Add a visual aiming indicator for rockets
+    this.rocketAimIndicator = this.add.graphics();
+    this.rocketAimIndicator.setScrollFactor(0);
+    this.rocketAimIndicator.setDepth(999);
+    this.rocketAimIndicator.setVisible(false);
+    
+    // Track rocket firing state
+    this.rocketAimActive = false;
+    this.rocketAimTouchId = null;
+    this.rocketAimX = 0;
+    this.rocketAimY = 0;
     
     // Enable multi-touch
     this.input.addPointer(3); // Support up to 4 touches (default is 2)
     
-    // Handle joystick creation on left side
-    leftHalfZone.on('pointerdown', (pointer) => {
-      if (!this.joystickActive) {
+    // Handle pointer down for both joystick and rocket firing
+    this.input.on('pointerdown', (pointer) => {
+      // First check if this is the shoot button - give it highest priority
+      const distToShootButton = Phaser.Math.Distance.Between(
+        pointer.x, pointer.y,
+        width - buttonPadding, height - buttonPadding
+      );
+      
+      // If the touch is on or near the shoot button, let the button handler take care of it
+      if (distToShootButton < buttonSize * 3) { // Increased detection area for better usability
+        console.log('Touch on or near shoot button, letting button handler take over');
+        return;
+      }
+      
+      // If this is on the left side and no active joystick, create joystick
+      if (pointer.x < width / 2 && !this.joystickActive) {
         console.log('Left side touched - creating joystick at', pointer.x, pointer.y);
         
         // Set joystick position to exact touch position in screen coordinates
@@ -632,10 +621,91 @@ class MainScene extends Phaser.Scene {
         // Track this touch for future updates
         this.joystickTouchId = pointer.id;
         this.joystickActive = true;
+        return;
+      }
+      
+      // For any other touch (right side or left side with active joystick), fire rocket
+      // Check if rocket is ready (if server state exists)
+      const rocketReady = !this.serverState.ship || this.serverState.ship.rocket_cooldown <= 0;
+      
+      if (rocketReady) {
+        console.log('Firing rocket at', pointer.x, pointer.y);
+        
+        // Get the exact world coordinates where the user touched
+        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        console.log('World point for aiming:', worldPoint.x, worldPoint.y);
+        
+        // Update the aimTarget object with the touch coordinates
+        if (!this.aimTarget) {
+          this.aimTarget = { x: 0, y: 0 };
+        }
+        this.aimTarget.x = worldPoint.x;
+        this.aimTarget.y = worldPoint.y;
+        
+        // Set boost flag
+        this.inputState.boost = true;
+        
+        // Log the ship position and target for debugging
+        if (this.ship) {
+          console.log('Ship position:', this.ship.x, this.ship.y);
+          console.log('Aiming from ship to:', worldPoint.x, worldPoint.y);
+          
+          // Calculate and log the direction vector
+          const dx = worldPoint.x - this.ship.x;
+          const dy = worldPoint.y - this.ship.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          console.log('Direction vector:', dx/dist, dy/dist);
+        }
+        
+        // Send input to server immediately
+        this.sendInput();
+        
+        // Reset boost flag after a short delay
+        setTimeout(() => {
+          this.inputState.boost = false;
+          this.sendInput();
+        }, 100);
+        
+        // Show visual feedback
+        this.showNotification("Firing rocket!", false);
+        
+        // Show aiming indicator with improved visualization
+        this.rocketAimIndicator.clear();
+        this.rocketAimIndicator.lineStyle(2, 0xff9900, 0.8);
+        
+        // Get ship screen position
+        let shipScreenX, shipScreenY;
+        if (this.ship) {
+          const shipScreenPos = this.cameras.main.worldToScreenPoint(this.ship.x, this.ship.y);
+          shipScreenX = shipScreenPos.x;
+          shipScreenY = shipScreenPos.y;
+        } else {
+          // Fallback if ship isn't available
+          shipScreenX = width / 2;
+          shipScreenY = height / 2;
+        }
+        
+        // Draw a line from ship to touch point
+        this.rocketAimIndicator.beginPath();
+        this.rocketAimIndicator.moveTo(shipScreenX, shipScreenY);
+        this.rocketAimIndicator.lineTo(pointer.x, pointer.y);
+        this.rocketAimIndicator.strokePath();
+        
+        // Draw a circle at the touch point
+        this.rocketAimIndicator.strokeCircle(pointer.x, pointer.y, 10);
+        this.rocketAimIndicator.setVisible(true);
+        
+        // Hide the indicator after a short delay
+        setTimeout(() => {
+          this.rocketAimIndicator.setVisible(false);
+        }, 300);
+      } else {
+        // Show cooldown notification
+        this.showNotification("Rocket on cooldown!", true);
       }
     });
     
-    // Handle pointer move to update joystick position - use global input manager
+    // Handle pointer move to update joystick position
     this.input.on('pointermove', (pointer) => {
       if (this.joystickActive && pointer.id === this.joystickTouchId) {
         // Calculate the distance from the start position
@@ -666,7 +736,7 @@ class MainScene extends Phaser.Scene {
       }
     });
     
-    // Handle pointer up to hide joystick - use global input manager
+    // Handle pointer up to hide joystick
     this.input.on('pointerup', (pointer) => {
       if (this.joystickActive && pointer.id === this.joystickTouchId) {
         console.log('Joystick touch released');
@@ -695,7 +765,7 @@ class MainScene extends Phaser.Scene {
       }
     });
     
-    // Handle pointer cancel to hide joystick - use global input manager
+    // Handle pointer cancel to hide joystick
     this.input.on('pointercancel', (pointer) => {
       if (this.joystickActive && pointer.id === this.joystickTouchId) {
         console.log('Joystick touch cancelled');
@@ -1301,7 +1371,7 @@ class MainScene extends Phaser.Scene {
 
   update(time, delta) {
     const dt = delta / 1000;
-    const shipSpeed = 100;
+    const shipSpeed = 100; // Re-add the shipSpeed variable
     
     // Only process input if player can move (not during countdown)
     if (this.playerCanMove !== false) {
