@@ -232,10 +232,9 @@ class MainScene extends Phaser.Scene {
     // Disable context menu so right click can be used for boost.
     this.input.mouse.disableContextMenu();
     
-    // Get current game size
-    const width = this.scale.width;
-    const height = this.scale.height;
-    console.log(`Initial game size: ${width} x ${height}`);
+    // Get the current game size
+    const gameSize = this.scale.gameSize;
+    console.log(`Game size: ${gameSize.width}x${gameSize.height}`);
     
     // Check if we're on a mobile device and log it
     this.isMobile = this.detectMobile();
@@ -243,6 +242,9 @@ class MainScene extends Phaser.Scene {
     
     // Add resize event listener
     this.scale.on('resize', this.handleResize, this);
+    
+    // Background removed for testing purposes
+    // this.backgroundGrid = this.createBackgroundGrid(6000, 6200);
     
     const mapData = this.cache.json.get('mapData');
     this.mapObjects = mapData;
@@ -298,11 +300,11 @@ class MainScene extends Phaser.Scene {
     // Create a background that extends beyond the playable area
     const gameWidth = 2000;
     const gameHeight = 1200;
-    const extendedWidth = gameWidth * 2;  // Increase from 1.5 to 2
-    const extendedHeight = gameHeight * 2; // Increase from 1.5 to 2
+    const extendedWidth = gameWidth * 3;  // Increase from 1.5 to 2
+    const extendedHeight = gameHeight * 3; // Increase from 1.5 to 2
     
-    // Create a background grid pattern that extends beyond the map
-    this.createBackgroundGrid(extendedWidth, extendedHeight);
+    // Background removed for testing purposes
+    // this.createBackgroundGrid(extendedWidth, extendedHeight);
 
     this.ship = this.add.sprite(400, 300, 'ship').setScale(0.09);
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.55).setOrigin(0.5);
@@ -1290,69 +1292,36 @@ class MainScene extends Phaser.Scene {
   }
   
   updateRemoteShips(time) {
-    // Use a slightly larger buffer for desktop devices to account for higher frame rates
-    const renderBuffer = this.isMobile ? 50 : 100;
-    const renderTime = time - (this.serverTimeOffset || 0) - renderBuffer;
-    
     for (const id in this.otherShips) {
       const sprite = this.otherShips[id];
       if (sprite.history && sprite.history.length >= 2) {
-        let older = sprite.history[0];
-        let newer = sprite.history[1];
-        for (let i = 0; i < sprite.history.length - 1; i++) {
-          if (sprite.history[i].timestamp <= renderTime &&
-              sprite.history[i + 1].timestamp >= renderTime) {
-            older = sprite.history[i];
-            newer = sprite.history[i + 1];
-            break;
-          }
-        }
+        // Use the two most recent positions for simple interpolation
+        const prev = sprite.history[sprite.history.length - 2];
+        const curr = sprite.history[sprite.history.length - 1];
         
-        const deltaT = newer.timestamp - older.timestamp;
-        const t = Phaser.Math.Clamp((renderTime - older.timestamp) / deltaT, 0, 1);
-        const targetX = Phaser.Math.Linear(older.x, newer.x, t);
-        const targetY = Phaser.Math.Linear(older.y, newer.y, t);
-        
-        // Calculate movement speed to adjust smoothing factor
-        const dx = newer.x - older.x;
-        const dy = newer.y - older.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        const speed = deltaT > 0 ? distance / deltaT : 0;
-        
-        // Adaptive smoothing based on device type and speed
-        let smoothingFactor;
-        if (this.isMobile) {
-          // Mobile devices - use original smoothing
-          smoothingFactor = 0.1;
-        } else {
-          // Desktop devices - use adaptive smoothing based on speed
-          const baseSmoothing = 0.2;
-          const minSmoothing = 0.05;
-          const speedThreshold = 0.5;
-          
-          if (speed > speedThreshold) {
-            // Less smoothing for fast-moving ships to keep up with changes
-            smoothingFactor = minSmoothing;
-          } else {
-            // More smoothing for slower ships for fluid movement
-            smoothingFactor = baseSmoothing;
-          }
-        }
+        // Simple fixed smoothing factor for consistent movement
+        const smoothingFactor = 0.1;
         
         // Apply smoothing
-        sprite.x = Phaser.Math.Linear(sprite.x, targetX, smoothingFactor);
-        sprite.y = Phaser.Math.Linear(sprite.y, targetY, smoothingFactor);
+        sprite.x = Phaser.Math.Linear(sprite.x, curr.x, smoothingFactor);
+        sprite.y = Phaser.Math.Linear(sprite.y, curr.y, smoothingFactor);
 
         // Calculate movement direction for rotation
+        const dx = curr.x - prev.x;
+        const dy = curr.y - prev.y;
+        
         if (dx !== 0 || dy !== 0) {
           const angle = Math.atan2(dy, dx);
-          // Smooth rotation transition
-          const rotationSpeed = this.isMobile ? 1.0 : 0.2;
+          // Simple rotation with fixed speed
+          const rotationSpeed = 0.2;
           sprite.rotation = Phaser.Math.Angle.RotateTo(sprite.rotation, angle, rotationSpeed);
         }
-
-        // Generate particles for remote ships
-        this.generateRemoteShipParticles(sprite, older, newer);
+        
+        // Generate particles for remote ships - only if moving significantly
+        const distanceMoved = Phaser.Math.Distance.Between(prev.x, prev.y, curr.x, curr.y);
+        if (distanceMoved > 3) {
+          this.generateRemoteShipParticles(sprite, prev, curr);
+        }
         
         // Update name position
         if (sprite.nameText) {
@@ -1361,34 +1330,40 @@ class MainScene extends Phaser.Scene {
         }
         
         // Update rocket cooldown indicator
-        if (sprite.rocketCooldownGraphics && newer.rocket_cooldown !== undefined) {
-          this.updateRemoteRocketCooldown(sprite, newer);
+        if (sprite.rocketCooldownGraphics && curr.rocket_cooldown !== undefined) {
+          this.updateRemoteRocketCooldown(sprite, curr);
         }
+      }
+      
+      // Limit history size to improve performance
+      if (sprite.history && sprite.history.length > 5) {
+        // Keep only the 5 most recent positions
+        sprite.history = sprite.history.slice(-5);
       }
     }
   }
 
   generateRemoteShipParticles(sprite, older, newer) {
-    // Calculate the movement distance
-    const distanceMoved = Phaser.Math.Distance.Between(older.x, older.y, newer.x, newer.y);
-
-    // Only generate particles if the ship has moved significantly
-    const movementThreshold = 2.5;
-    if (distanceMoved > movementThreshold) {
-        const dx = newer.x - older.x;
-        const dy = newer.y - older.y;
-
-        const direction = new Phaser.Math.Vector2(dx, dy).normalize();
-
-        if (direction.length() > 0) {
-            // Calculate the opposite direction
-            const oppositeDirection = direction.clone().negate();
-
-            // Emit particles in the opposite direction
-            const particleX = sprite.x + oppositeDirection.x * 20;
-            const particleY = sprite.y + oppositeDirection.y * 20;
-            this.particleEmitter.emitParticleAt(particleX, particleY);
-        }
+    // We already checked the distance threshold in the calling method
+    // Just calculate direction and emit particles
+    const dx = newer.x - older.x;
+    const dy = newer.y - older.y;
+    
+    // Skip normalization for better performance - just use the raw direction
+    const length = Math.sqrt(dx * dx + dy * dy);
+    if (length > 0) {
+      // Calculate the opposite direction
+      const oppositeX = -dx / length;
+      const oppositeY = -dy / length;
+      
+      // Emit particles in the opposite direction
+      const particleX = sprite.x + oppositeX * 20;
+      const particleY = sprite.y + oppositeY * 20;
+      
+      // Emit fewer particles for better performance
+      if (Math.random() < 0.7) { // Only emit particles 70% of the time
+        this.particleEmitter.emitParticleAt(particleX, particleY);
+      }
     }
   }
 
@@ -1418,95 +1393,43 @@ class MainScene extends Phaser.Scene {
     }
 
     // If the ball is not grabbed or the grabbing player is not visible,
-    // use interpolation for smooth ball movement
-    const launchOffset = 20;
-    // Adjust parameters based on device type
-    const baseSmoothingFactor = this.isMobile ? 0.06 : 0.1;  // Higher base smoothing for desktop
-    const correctionFactor = this.isMobile ? 0.1 : 0.05;     // Less correction for desktop for smoother movement
-    const historyLimit = this.isMobile ? 10 : 15;            // More history points for desktop
-    const renderDelay = this.isMobile ? 150 : 100;           // Less delay for desktop for more responsive feel
-
-    // Maintain a history buffer for ball positions
+    // use simple interpolation for smooth ball movement
+    
+    // Maintain a history buffer for ball positions - but keep it small
     if (!this.ballHistory) this.ballHistory = [];
+    
+    // Add current state to history
     this.ballHistory.push({
       x: this.latestBallState.x,
       y: this.latestBallState.y,
       timestamp: time
     });
-
-    // Remove old updates (keep only the last 'historyLimit' entries)
+    
+    // Keep only the last 5 entries - smaller history for better performance
+    const historyLimit = 5;
     while (this.ballHistory.length > historyLimit) {
       this.ballHistory.shift();
     }
-
-    // Apply small client-side delay to smooth interpolation
-    const renderTime = time - renderDelay;
-    let prev = null, curr = null;
-
-    for (let i = 0; i < this.ballHistory.length - 1; i++) {
-      if (this.ballHistory[i].timestamp <= renderTime && 
-          this.ballHistory[i + 1].timestamp >= renderTime) {
-        prev = this.ballHistory[i];
-        curr = this.ballHistory[i + 1];
-        break;
-      }
-    }
-
-    if (prev && curr) {
-      // Time factor for interpolation
-      let t = Phaser.Math.Clamp((renderTime - prev.timestamp) / (curr.timestamp - prev.timestamp), 0, 1);
-
-      // Apply advanced interpolation based on device type
-      let targetX, targetY;
+    
+    // Use a simple approach - just interpolate between the last two positions
+    if (this.ballHistory.length >= 2) {
+      const prev = this.ballHistory[this.ballHistory.length - 2];
+      const curr = this.ballHistory[this.ballHistory.length - 1];
       
-      if (this.isMobile || this.ballHistory.length < 4) {
-        // Simple Catmull-Rom for mobile or when we don't have enough points
-        targetX = Phaser.Math.Interpolation.CatmullRom([prev.x, curr.x], t);
-        targetY = Phaser.Math.Interpolation.CatmullRom([prev.y, curr.y], t);
-      } else {
-        // For desktop with enough history points, use full Catmull-Rom spline
-        // Extract points for spline interpolation
-        const xPoints = this.ballHistory.slice(-4).map(p => p.x);
-        const yPoints = this.ballHistory.slice(-4).map(p => p.y);
-        
-        // Use Catmull-Rom spline for smoother curves
-        targetX = Phaser.Math.Interpolation.CatmullRom(xPoints, t);
-        targetY = Phaser.Math.Interpolation.CatmullRom(yPoints, t);
-      }
-
-      // Adaptive smoothing based on ball speed
-      let speed = Math.sqrt((curr.x - prev.x) ** 2 + (curr.y - prev.y) ** 2);
-      let dynamicSmoothing;
+      // Simple linear interpolation with fixed smoothing factor
+      const smoothingFactor = 0.1; // Fixed value for consistent movement
       
-      if (this.isMobile) {
-        // Mobile smoothing
-        dynamicSmoothing = speed < 5 ? 0.15 : baseSmoothingFactor;
-      } else {
-        // Desktop smoothing - more adaptive based on speed
-        const minSmoothing = 0.05;
-        const maxSmoothing = 0.2;
-        const speedThreshold = 10;
-        
-        // Inverse relationship: faster ball = less smoothing
-        dynamicSmoothing = Math.max(minSmoothing, 
-                                   Math.min(maxSmoothing, 
-                                           maxSmoothing - (speed / speedThreshold) * (maxSmoothing - minSmoothing)));
-      }
-
-      this.ball.x = Phaser.Math.Linear(this.ball.x, targetX, dynamicSmoothing);
-      this.ball.y = Phaser.Math.Linear(this.ball.y, targetY, dynamicSmoothing);
+      this.ball.x = Phaser.Math.Linear(this.ball.x, curr.x, smoothingFactor);
+      this.ball.y = Phaser.Math.Linear(this.ball.y, curr.y, smoothingFactor);
+      this.ball.setDepth(0);
+      this.ball.setVisible(true);
+    } else {
+      // If we don't have enough history, just use the latest position
+      this.ball.x = this.latestBallState.x;
+      this.ball.y = this.latestBallState.y;
       this.ball.setDepth(0);
       this.ball.setVisible(true);
     }
-
-    // Final correction to ensure accuracy - less frequent on desktop for smoother movement
-    const correctionInterval = this.isMobile ? 80 : 120;
-    this.time.delayedCall(correctionInterval, () => {
-      if (this.latestBallState && !this.latestBallState.grabbed) {
-        this.ball.x = Phaser.Math.Linear(this.ball.x, this.latestBallState.x, correctionFactor);
-        this.ball.y = Phaser.Math.Linear(this.ball.y, this.latestBallState.y, correctionFactor);
-      }
-    }, [], this);
   }
 
   generateParticles() {
@@ -1531,7 +1454,7 @@ class MainScene extends Phaser.Scene {
 
   update(time, delta) {
     const dt = delta / 1000;
-    const shipSpeed = 100; // Re-add the shipSpeed variable
+    const shipSpeed = 120; // Increased from 100 to 120 (20% faster) to match server
     
     // Only process input if player can move (not during countdown)
     if (this.playerCanMove !== false) {
@@ -2284,28 +2207,9 @@ class MainScene extends Phaser.Scene {
 
   // Add a new method to create a background grid
   createBackgroundGrid(width, height) {
-    const graphics = this.add.graphics();
-    
-    // Set line style for the grid
-    graphics.lineStyle(1, 0x333333, 0.3);
-    
-    // Draw vertical lines
-    for (let x = 0; x <= width; x += 100) {
-      graphics.moveTo(x, 0);
-      graphics.lineTo(x, height);
-    }
-    
-    // Draw horizontal lines
-    for (let y = 0; y <= height; y += 100) {
-      graphics.moveTo(0, y);
-      graphics.lineTo(width, y);
-    }
-    
-    // Draw the grid
-    graphics.strokePath();
-    
-    // Set depth to ensure it's behind everything else
-    graphics.setDepth(-100);
+    // Empty method - background removed for testing purposes
+    console.log("Background disabled for testing purposes");
+    return null;
   }
   
   // Add a new method to update camera position with dynamic offset
