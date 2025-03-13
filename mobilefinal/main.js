@@ -26,11 +26,39 @@ class LatencyBuffer {
 class MainScene extends Phaser.Scene {
   constructor() {
     super({ key: 'MainScene' });
+    
+    // Initialize game state
+    this.clientId = null;
+    this.otherShips = {};
+    this.ballHistory = [];
+    this.latestBallState = null;
+    this.serverTimeOffset = null;
+    this.pingValue = 0;
+    this.playerCanMove = true;
+    this.isMobile = false;
+    this.isHost = false;
+    this.playerTeam = null;
+    this.team1Score = 0;
+    this.team2Score = 0;
+    this.reconnectAttempts = 0;
+    this.connectionAttempt = 0;
+    this.isConnecting = false; // Track if we're currently connecting
+    this.connectionEstablished = false; // Track if we've successfully connected
+    
+    // Input state
+    this.inputState = {
+      left: false,
+      right: false,
+      up: false,
+      down: false,
+      shoot: false,
+      boost: false
+    };
+    
     // Ship and state
     this.ship = null;
     this.predictedState = { x: 400, y: 300 };
     this.serverState = { ship: { x: 400, y: 300, seq: 0 }, boost: 200 };
-    this.otherShips = {};
     this.socket = null;
     this.ball = null;
     this.latestBallState = null;
@@ -376,49 +404,388 @@ class MainScene extends Phaser.Scene {
     this.prevShipPos.x = this.ship.x;
     this.prevShipPos.y = this.ship.y;
     
-    // Connect to WebSocket server
-    this.connectWebSocket();
-    
-    // Set up input handling based on device type
-    if (this.isMobile) {
-      this.setupMobileControls();
-    } else {
-      this.setupDesktopControls();
+    // Close any existing socket before creating a new one
+    if (window.gameSocket && window.gameSocket.readyState !== WebSocket.CLOSED) {
+        console.log('Closing existing game socket');
+        window.gameSocket.close();
     }
     
-    // Add controller support for all devices
-    this.setupControllerSupport();
+    // Reset connection tracking
+    window.activeConnections = window.activeConnections || 0;
     
-    // Make the game instance accessible globally for team switching
-    window.gameInstance = this;
-    console.log('Game instance set to window.gameInstance');
+    // Add a delay before connecting to the game server
+    console.log('Waiting 2 seconds before connecting to game server...');
+    this.connectionAttempt = 1;
+    this.isConnecting = false;
+    this.connectionEstablished = false;
     
-    // Set up ping interval - shorter for mobile
-    this.pingInterval = setInterval(() => {
-      this.sendPing();
-    }, this.isMobile ? 1000 : 2000); // Send ping every 1 second on mobile, 2 seconds on desktop
+    // Set up connection timeout
+    if (this.connectionTimeout) {
+        clearTimeout(this.connectionTimeout);
+    }
     
-    // Handle window resize
-    this.scale.on('resize', this.handleResize, this);
+    this.connectionTimeout = setTimeout(() => {
+        this.connectToGameServer();
+    }, this.isMobile ? 3000 : 2000); // Longer delay for mobile
+  }
+  
+  connectToGameServer() {
+    // Prevent multiple simultaneous connection attempts
+    if (this.isConnecting) {
+        console.log('Already attempting to connect, skipping this attempt');
+        return;
+    }
     
-    // Add countdown text
-    this.countdownText = this.add.text(this.scale.width / 2, 100, '', {
-      fontFamily: 'Arial',
-      fontSize: Math.min(64, this.scale.width * 0.05),
-      color: '#ffffff',
-      stroke: '#000000',
-      strokeThickness: 6,
-      align: 'center'
-    }).setOrigin(0.5).setDepth(1000).setScrollFactor(0).setVisible(false);
+    // If we're already connected, don't try to connect again
+    if (this.connectionEstablished && this.socket && this.socket.readyState === WebSocket.OPEN) {
+        console.log('Already connected, skipping connection attempt');
+        return;
+    }
     
-    // Add direction indicator
-    this.directionIndicator = this.add.graphics();
-    this.directionIndicator.lineStyle(3, 0xffffff, 0.8);
-    this.directionIndicator.beginPath();
-    this.directionIndicator.moveTo(0, 0);
-    this.directionIndicator.lineTo(40, 0);
-    this.directionIndicator.closePath();
-    this.directionIndicator.strokePath();
+    this.isConnecting = true;
+    console.log(`Game server connection attempt #${this.connectionAttempt} (Active connections: ${window.activeConnections})`);
+    
+    // Close any existing socket before creating a new one
+    if (window.gameSocket && window.gameSocket.readyState !== WebSocket.CLOSED) {
+        console.log('Closing existing game socket');
+        window.gameSocket.close();
+        window.gameSocket = null;
+    }
+    
+    // Clean up any existing socket
+    if (this.socket) {
+        if (this.socket.readyState !== WebSocket.CLOSED) {
+            console.log('Closing existing socket');
+            this.socket.close();
+        }
+        this.socket = null;
+    }
+    
+    // Increment active connections counter
+    window.activeConnections++;
+    console.log(`Incremented active connections to ${window.activeConnections}`);
+    
+    // Connect to the WebSocket server
+    try {
+        this.socket = new WebSocket(window.WEBSOCKET_URL);
+        window.gameSocket = this.socket; // Store reference for cleanup
+        
+        // Set up connection timeout
+        if (this.connectionTimeout) {
+            clearTimeout(this.connectionTimeout);
+        }
+        
+        this.connectionTimeout = setTimeout(() => {
+            if (this.socket && this.socket.readyState !== WebSocket.OPEN) {
+                console.error(`Game socket connection timeout on attempt #${this.connectionAttempt}`);
+                
+                // Clean up this connection attempt
+                this.cleanupConnection();
+                
+                // Retry with exponential backoff
+                const retryDelay = Math.min(1000 * Math.pow(1.5, this.connectionAttempt), 10000);
+                console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${this.connectionAttempt + 1})`);
+                
+                this.connectionAttempt++;
+                this.isConnecting = false;
+                
+                this.connectionTimeout = setTimeout(() => {
+                    this.connectToGameServer();
+                }, retryDelay);
+                
+                this.showConnectionError(`Connection attempt #${this.connectionAttempt-1} timed out. Retrying...`);
+            }
+        }, 5000 + (this.connectionAttempt * 1000)); // Increase timeout for later attempts
+        
+        this.socket.onopen = () => {
+            console.log(`Connected to game server on attempt #${this.connectionAttempt}`);
+            clearTimeout(this.connectionTimeout);
+            
+            // Mark as connected
+            this.connectionEstablished = true;
+            this.isConnecting = false;
+            
+            // Reset connection attempt counter
+            this.connectionAttempt = 1;
+            
+            // Set up ping interval to keep connection alive
+            if (this.pingInterval) {
+                clearInterval(this.pingInterval);
+            }
+            
+            this.pingInterval = setInterval(() => {
+                if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+                    this.socket.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }));
+                }
+            }, this.isMobile ? 1000 : 2000);
+            
+            // Reset reconnection attempts on successful connection
+            this.reconnectAttempts = 0;
+            
+            if (connectionStatus) {
+              connectionStatus.textContent = 'Connected to game server';
+              connectionStatus.className = 'connected';
+              
+              // Hide the status after a few seconds
+              setTimeout(() => {
+                connectionStatus.style.opacity = '0';
+              }, 3000);
+            }
+            
+            // Start sending regular pings to keep the connection alive (especially for mobile)
+            if (this.pingInterval) {
+              clearInterval(this.pingInterval);
+            }
+            this.pingInterval = setInterval(() => {
+              this.sendPing();
+            }, this.isMobile ? 2000 : 15000); // Send a ping every 2 seconds on mobile, 15 seconds on desktop
+            
+            // Send an initial ping to test the connection
+            this.sendPing();
+        };
+        
+        this.socket.onclose = (event) => {
+            console.log(`WebSocket connection closed on attempt #${this.connectionAttempt}:`, event.code, event.reason);
+            
+            // Clean up this connection
+            this.cleanupConnection();
+            
+            // Only retry if this wasn't a clean close and we haven't established a new connection
+            if (event.code !== 1000 && event.code !== 1001 && !this.connectionEstablished) {
+                // Retry with exponential backoff
+                const retryDelay = Math.min(1000 * Math.pow(1.5, this.connectionAttempt), 10000);
+                console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${this.connectionAttempt + 1})`);
+                
+                this.connectionAttempt++;
+                
+                // Don't retry if we've tried too many times
+                if (this.connectionAttempt > 5) {
+                    console.log('Too many connection attempts, giving up');
+                    this.showConnectionError('Could not connect after multiple attempts. Please refresh the page.');
+                    return;
+                }
+                
+                this.connectionTimeout = setTimeout(() => {
+                    this.isConnecting = false;
+                    this.connectToGameServer();
+                }, retryDelay);
+                
+                this.showConnectionError(`Connection closed. Retrying in ${Math.round(retryDelay/1000)} seconds...`);
+            } else {
+                this.showConnectionError('Connection closed. Please refresh the page to reconnect.');
+            }
+        };
+        
+        this.socket.onerror = (error) => {
+            console.error(`WebSocket error on attempt #${this.connectionAttempt}:`, error);
+            // Error handling is done in the onclose handler
+        };
+        
+        this.socket.addEventListener('message', (event) => {
+          try {
+            // Handle simple text messages
+            if (event.data === 'ping') {
+              this.socket.send('pong');
+              return;
+            }
+            
+            // Handle simple "connected" message
+            if (event.data === 'connected') {
+              console.log('Received connected confirmation from server');
+              return;
+            }
+            
+            // Try to parse as JSON
+            try {
+              const msg = JSON.parse(event.data);
+              
+              // Handle ping response
+              if (msg.type === "pong" && msg.timestamp) {
+                this.pingValue = Date.now() - msg.timestamp;
+                if (this.pingText) {
+                  this.pingText.setText("Ping: " + this.pingValue + " ms");
+                }
+                return;
+              }
+              
+              // Handle heartbeat message
+              if (msg.type === "heartbeat") {
+                // Just acknowledge receipt by sending a ping
+                this.sendPing();
+                return;
+              }
+              
+              // Handle player ID assignment and host status
+              if (msg.type === 'init') {
+                // If we already had an ID and it's different, reload the page
+                if (this.clientId && this.clientId !== msg.your_id) {
+                  console.log('Received new client ID, reloading...');
+                  window.location.reload();
+                  return;
+                }
+                
+                this.clientId = msg.your_id;
+                this.playerTeam = msg.team;
+                this.isHost = msg.is_host;
+                console.log('Assigned client ID:', this.clientId, 'Team:', this.playerTeam, 'Host:', this.isHost);
+                
+                // Update team text and ship color
+                this.updateTeamDisplay();
+                if (this.playerTeam === 'red') {
+                  this.ship.setTint(0xff0000);
+                } else if (this.playerTeam === 'blue') {
+                  this.ship.setTint(0x0000ff);
+                }
+                
+                // Show/hide reset button based on host status
+                this.updateResetButtonVisibility();
+                
+                return;
+              }
+              
+              // Handle error messages
+              if (msg.type === 'error') {
+                this.showNotification(msg.message, true);
+                return;
+              }
+              
+              // Handle goal event
+              if (msg.type === "goal") {
+                this.team1Score = msg.team1_score;
+                this.team2Score = msg.team2_score;
+                this.updateScoreDisplay();
+                
+                // Show goal animation with team color
+                const scorerTeam = msg.scorer_team;
+                this.showGoalAnimation(scorerTeam);
+                return;
+              }
+              
+              // Handle countdown message
+              if (msg.type === 'countdown') {
+                this.handleCountdown(msg.count);
+                return;
+              }
+              
+              // Handle game reset message
+              if (msg.type === 'game_reset') {
+                this.handleGameReset(msg);
+                return;
+              }
+              
+              // Handle shoot message
+              if (msg.type === 'shoot') {
+                // Play shoot sound or animation
+                this.playShootEffect(msg.player_id);
+                return;
+              }
+              
+              // Handle auto-shoot message
+              if (msg.type === 'auto_shoot') {
+                // Play auto-shoot sound or animation
+                this.playShootEffect(msg.player_id);
+                return;
+              }
+              
+              // Handle ball knocked loose message
+              if (msg.type === 'ball_knocked') {
+                // Play ball knocked loose effect
+                this.playBallKnockedEffect(msg.player_id);
+                return;
+              }
+              
+              // Handle projectile fired message
+              if (msg.type === 'projectile_fired') {
+                // Play projectile fired effect
+                this.playProjectileFiredEffect(msg.player_id);
+                return;
+              }
+              
+              // Handle explosion message
+              if (msg.type === 'explosion') {
+                // Play explosion effect
+                this.playExplosionEffect(msg.x, msg.y, msg.radius, msg.player_id);
+                return;
+              }
+              
+              // If we got here, it's a game state update
+              this.incomingBuffer.push(event.data);
+            } catch (jsonError) {
+              console.log('Received non-JSON message:', event.data);
+            }
+          } catch (e) {
+            console.error('Error handling WebSocket message:', e);
+          }
+        });
+        
+        // Set up input handling based on device type
+        if (this.isMobile) {
+          this.setupMobileControls();
+        } else {
+          this.setupDesktopControls();
+        }
+        
+        // Add controller support for all devices
+        this.setupControllerSupport();
+        
+        // Make the game instance accessible globally for team switching
+        window.gameInstance = this;
+        console.log('Game instance set to window.gameInstance');
+        
+        // Handle window resize
+        this.scale.on('resize', this.handleResize, this);
+        
+        // Add countdown text
+        this.countdownText = this.add.text(this.scale.width / 2, 100, '', {
+          fontFamily: 'Arial',
+          fontSize: Math.min(64, this.scale.width * 0.05),
+          color: '#ffffff',
+          stroke: '#000000',
+          strokeThickness: 6,
+          align: 'center'
+        }).setOrigin(0.5).setDepth(1000).setScrollFactor(0).setVisible(false);
+        
+        // Add direction indicator
+        this.directionIndicator = this.add.graphics();
+        this.directionIndicator.lineStyle(3, 0xffffff, 0.8);
+        this.directionIndicator.beginPath();
+        this.directionIndicator.moveTo(0, 0);
+        this.directionIndicator.lineTo(40, 0);
+        this.directionIndicator.closePath();
+        this.directionIndicator.strokePath();
+    } catch (error) {
+        console.error('Error creating WebSocket:', error);
+        this.cleanupConnection();
+        
+        // Retry after a delay
+        setTimeout(() => {
+            this.isConnecting = false;
+            this.connectToGameServer();
+        }, 2000);
+    }
+  }
+  
+  // Helper method to clean up connection resources
+  cleanupConnection() {
+    // Clear timeouts and intervals
+    if (this.connectionTimeout) {
+        clearTimeout(this.connectionTimeout);
+        this.connectionTimeout = null;
+    }
+    
+    if (this.pingInterval) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+    }
+    
+    // Decrement active connections counter
+    if (window.activeConnections > 0) {
+        window.activeConnections--;
+        console.log(`Decremented active connections to ${window.activeConnections}`);
+    }
+    
+    // Reset connection state
+    this.isConnecting = false;
   }
   
   setupDesktopControls() {
@@ -922,316 +1289,81 @@ class MainScene extends Phaser.Scene {
     }
   }
   
-  connectWebSocket() {
-    console.log('Attempting to connect to WebSocket...');
-    
-    // Update connection status if the element exists
-    const connectionStatus = document.getElementById('connection-status');
-    if (connectionStatus) {
-      connectionStatus.textContent = 'Connecting to game server...';
-      connectionStatus.className = 'connecting';
-    }
-    
-    // Clear existing game state on reconnect
-    this.otherShips = {};
-    this.ballHistory = [];
-    this.latestBallState = null;
-    
-    // Use the WebSocket URL from the game.html page if available
-    const wsUrl = window.WEBSOCKET_URL || 'wss://towerup.io/ws';
-    console.log('Connecting to WebSocket URL:', wsUrl);
-    
-    // Close existing socket if it exists
-    if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
-      this.socket.close();
-    }
-    
-    this.socket = new WebSocket(wsUrl);
-    
-    // Set connection timeout
-    const connectionTimeout = setTimeout(() => {
-      if (this.socket.readyState !== WebSocket.OPEN) {
-        console.error('WebSocket connection timeout');
-        this.socket.close();
-        
-        if (connectionStatus) {
-          connectionStatus.textContent = 'Connection timeout. Retrying...';
-          connectionStatus.className = 'error';
-        }
-      }
-    }, 5000);
-    
-    this.socket.addEventListener('open', () => {
-      console.log('WebSocket connection opened successfully');
-      clearTimeout(connectionTimeout);
-      
-      // Reset reconnection attempts on successful connection
-      this.reconnectAttempts = 0;
-      
-      if (connectionStatus) {
-        connectionStatus.textContent = 'Connected to game server';
-        connectionStatus.className = 'connected';
-        
-        // Hide the status after a few seconds
-        setTimeout(() => {
-          connectionStatus.style.opacity = '0';
-        }, 3000);
-      }
-      
-      // Start sending regular pings to keep the connection alive (especially for mobile)
-      if (this.pingInterval) {
-        clearInterval(this.pingInterval);
-      }
-      this.pingInterval = setInterval(() => {
-        this.sendPing();
-      }, this.isMobile ? 2000 : 15000); // Send a ping every 2 seconds on mobile, 15 seconds on desktop
-      
-      // Send an initial ping to test the connection
-      this.sendPing();
-    });
-    
-    this.socket.addEventListener('message', (event) => {
-      try {
-        // Handle simple text messages
-        if (event.data === 'ping') {
-          this.socket.send('pong');
-          return;
-        }
-        
-        // Handle simple "connected" message
-        if (event.data === 'connected') {
-          console.log('Received connected confirmation from server');
-          return;
-        }
-        
-        // Try to parse as JSON
-        try {
-          const msg = JSON.parse(event.data);
-          
-          // Handle ping response
-          if (msg.type === "pong" && msg.timestamp) {
-            this.pingValue = Date.now() - msg.timestamp;
-            if (this.pingText) {
-              this.pingText.setText("Ping: " + this.pingValue + " ms");
-            }
-            return;
-          }
-          
-          // Handle heartbeat message
-          if (msg.type === "heartbeat") {
-            // Just acknowledge receipt by sending a ping
-            this.sendPing();
-            return;
-          }
-          
-          // Handle player ID assignment and host status
-          if (msg.type === 'init') {
-            // If we already had an ID and it's different, reload the page
-            if (this.clientId && this.clientId !== msg.your_id) {
-              console.log('Received new client ID, reloading...');
-              window.location.reload();
-              return;
-            }
-            
-            this.clientId = msg.your_id;
-            this.playerTeam = msg.team;
-            this.isHost = msg.is_host;
-            console.log('Assigned client ID:', this.clientId, 'Team:', this.playerTeam, 'Host:', this.isHost);
-            
-            // Update team text and ship color
-            this.updateTeamDisplay();
-            if (this.playerTeam === 'red') {
-              this.ship.setTint(0xff0000);
-            } else if (this.playerTeam === 'blue') {
-              this.ship.setTint(0x0000ff);
-            }
-            
-            // Show/hide reset button based on host status
-            this.updateResetButtonVisibility();
-            
-            return;
-          }
-          
-          // Handle error messages
-          if (msg.type === 'error') {
-            this.showNotification(msg.message, true);
-            return;
-          }
-          
-          // Handle goal event
-          if (msg.type === "goal") {
-            this.team1Score = msg.team1_score;
-            this.team2Score = msg.team2_score;
-            this.updateScoreDisplay();
-            
-            // Show goal animation with team color
-            const scorerTeam = msg.scorer_team;
-            this.showGoalAnimation(scorerTeam);
-            return;
-          }
-          
-          // Handle countdown message
-          if (msg.type === 'countdown') {
-            this.handleCountdown(msg.count);
-            return;
-          }
-          
-          // Handle game reset message
-          if (msg.type === 'game_reset') {
-            this.handleGameReset(msg);
-            return;
-          }
-          
-          // Handle shoot message
-          if (msg.type === 'shoot') {
-            // Play shoot sound or animation
-            this.playShootEffect(msg.player_id);
-            return;
-          }
-          
-          // Handle auto-shoot message
-          if (msg.type === 'auto_shoot') {
-            // Play auto-shoot sound or animation
-            this.playShootEffect(msg.player_id);
-            return;
-          }
-          
-          // Handle ball knocked loose message
-          if (msg.type === 'ball_knocked') {
-            // Play ball knocked loose effect
-            this.playBallKnockedEffect(msg.player_id);
-            return;
-          }
-          
-          // Handle projectile fired message
-          if (msg.type === 'projectile_fired') {
-            // Play projectile fired effect
-            this.playProjectileFiredEffect(msg.player_id);
-            return;
-          }
-          
-          // Handle explosion message
-          if (msg.type === 'explosion') {
-            // Play explosion effect
-            this.playExplosionEffect(msg.x, msg.y, msg.radius, msg.player_id);
-            return;
-          }
-          
-          // If we got here, it's a game state update
-          this.incomingBuffer.push(event.data);
-        } catch (jsonError) {
-          console.log('Received non-JSON message:', event.data);
-        }
-      } catch (e) {
-        console.error('Error handling WebSocket message:', e);
-      }
-    });
-    
-    this.socket.addEventListener('close', (event) => {
-      console.log('WebSocket connection closed', event.code, event.reason);
-      clearTimeout(connectionTimeout);
-      
-      // Clear ping interval
-      if (this.pingInterval) {
-        clearInterval(this.pingInterval);
-        this.pingInterval = null;
-      }
-      
-      if (connectionStatus) {
-        connectionStatus.textContent = 'Connection lost. Reconnecting...';
-        connectionStatus.className = 'error';
-        connectionStatus.style.opacity = '1';
-      }
-      
-      // Try to reconnect with exponential backoff
-      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-      this.reconnectAttempts++;
-      
-      console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-      
-      setTimeout(() => {
-        if (document.visibilityState === 'visible') {
-          this.connectWebSocket();
-        } else {
-          // If page is not visible, wait until it becomes visible
-          this.pendingReconnect = true;
-        }
-      }, delay);
-    });
-    
-    this.socket.addEventListener('error', (error) => {
-      console.error('WebSocket error:', error);
-      
-      if (connectionStatus) {
-        connectionStatus.textContent = 'Connection error. Retrying...';
-        connectionStatus.className = 'error';
-        connectionStatus.style.opacity = '1';
-      }
-    });
-  }
-  
-  updateRemoteShips(localTime) {
-    const renderTime = localTime - this.serverTimeOffset - 50;
-    console.log(`Updating remote ships at render time ${renderTime}`);
+  updateRemoteShips(time) {
+    // Use a slightly larger buffer for desktop devices to account for higher frame rates
+    const renderBuffer = this.isMobile ? 50 : 100;
+    const renderTime = time - (this.serverTimeOffset || 0) - renderBuffer;
     
     for (const id in this.otherShips) {
-      if (id == this.clientId) continue;
-      
       const sprite = this.otherShips[id];
-      console.log(`Processing ship for player ${id}:`, sprite);
-      
-      if (!sprite.history || sprite.history.length < 2) {
-        console.log(`Ship for player ${id} has insufficient history:`, sprite.history);
-        continue;
-      }
-      
-      // Find the two closest states in history
-      let older = null;
-      let newer = null;
-      for (let i = 0; i < sprite.history.length; i++) {
-        const state = sprite.history[i];
-        if (state.timestamp <= renderTime) {
-          older = state;
-        } else {
-          newer = state;
-          break;
+      if (sprite.history && sprite.history.length >= 2) {
+        let older = sprite.history[0];
+        let newer = sprite.history[1];
+        for (let i = 0; i < sprite.history.length - 1; i++) {
+          if (sprite.history[i].timestamp <= renderTime &&
+              sprite.history[i + 1].timestamp >= renderTime) {
+            older = sprite.history[i];
+            newer = sprite.history[i + 1];
+            break;
+          }
         }
-      }
-      
-      if (!older) older = sprite.history[0];
-      if (!newer) newer = sprite.history[sprite.history.length - 1];
-      
-      console.log(`Interpolating ship for player ${id} between:`, older, newer);
-      
-      // Interpolate between the two states
-      const alpha = newer.timestamp === older.timestamp ? 0 : (renderTime - older.timestamp) / (newer.timestamp - older.timestamp);
-      const x = Phaser.Math.Linear(older.x, newer.x, alpha);
-      const y = Phaser.Math.Linear(older.y, newer.y, alpha);
-      
-      // Update sprite position
-      sprite.x = x;
-      sprite.y = y;
-      
-      // Calculate movement direction for rotation
-      const dx = newer.x - older.x;
-      const dy = newer.y - older.y;
-      if (dx !== 0 || dy !== 0) {
-        const angle = Math.atan2(dy, dx);
-        sprite.rotation = angle;
-      }
-      
-      // Generate particles if moving
-      this.generateRemoteShipParticles(sprite, older, newer);
-      
-      // Update name position
-      if (sprite.nameText) {
-        sprite.nameText.x = x;
-        sprite.nameText.y = y - 30;
-      }
-      
-      // Update rocket cooldown indicator for other ships
-      if (sprite.rocketCooldownGraphics && sprite.rocketReadyText) {
-        this.updateRemoteRocketCooldown(sprite, sprite.history[sprite.history.length - 1]);
+        
+        const deltaT = newer.timestamp - older.timestamp;
+        const t = Phaser.Math.Clamp((renderTime - older.timestamp) / deltaT, 0, 1);
+        const targetX = Phaser.Math.Linear(older.x, newer.x, t);
+        const targetY = Phaser.Math.Linear(older.y, newer.y, t);
+        
+        // Calculate movement speed to adjust smoothing factor
+        const dx = newer.x - older.x;
+        const dy = newer.y - older.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        const speed = deltaT > 0 ? distance / deltaT : 0;
+        
+        // Adaptive smoothing based on device type and speed
+        let smoothingFactor;
+        if (this.isMobile) {
+          // Mobile devices - use original smoothing
+          smoothingFactor = 0.1;
+        } else {
+          // Desktop devices - use adaptive smoothing based on speed
+          const baseSmoothing = 0.2;
+          const minSmoothing = 0.05;
+          const speedThreshold = 0.5;
+          
+          if (speed > speedThreshold) {
+            // Less smoothing for fast-moving ships to keep up with changes
+            smoothingFactor = minSmoothing;
+          } else {
+            // More smoothing for slower ships for fluid movement
+            smoothingFactor = baseSmoothing;
+          }
+        }
+        
+        // Apply smoothing
+        sprite.x = Phaser.Math.Linear(sprite.x, targetX, smoothingFactor);
+        sprite.y = Phaser.Math.Linear(sprite.y, targetY, smoothingFactor);
+
+        // Calculate movement direction for rotation
+        if (dx !== 0 || dy !== 0) {
+          const angle = Math.atan2(dy, dx);
+          // Smooth rotation transition
+          const rotationSpeed = this.isMobile ? 1.0 : 0.2;
+          sprite.rotation = Phaser.Math.Angle.RotateTo(sprite.rotation, angle, rotationSpeed);
+        }
+
+        // Generate particles for remote ships
+        this.generateRemoteShipParticles(sprite, older, newer);
+        
+        // Update name position
+        if (sprite.nameText) {
+          sprite.nameText.x = sprite.x;
+          sprite.nameText.y = sprite.y - 30;
+        }
+        
+        // Update rocket cooldown indicator
+        if (sprite.rocketCooldownGraphics && newer.rocket_cooldown !== undefined) {
+          this.updateRemoteRocketCooldown(sprite, newer);
+        }
       }
     }
   }
@@ -1260,8 +1392,8 @@ class MainScene extends Phaser.Scene {
     }
   }
 
-  updateBall(localTime, delta) {
-    if (!this.latestBallState) return;
+  updateBall(time, delta) {
+    if (!this.latestBallState || !this.ball) return;
 
     // Handle ball grabbing
     if (this.latestBallState.grabbed) {
@@ -1288,61 +1420,92 @@ class MainScene extends Phaser.Scene {
     // If the ball is not grabbed or the grabbing player is not visible,
     // use interpolation for smooth ball movement
     const launchOffset = 20;
-    const baseSmoothingFactor = 0.06;  // Adaptive smoothing starts here
-    const correctionFactor = 0.1;      // Occasional drift correction
-    const historyLimit = 10;           // More updates for better interpolation
-    const renderDelay = 150;           // Introduce a slight delay in rendering
+    // Adjust parameters based on device type
+    const baseSmoothingFactor = this.isMobile ? 0.06 : 0.1;  // Higher base smoothing for desktop
+    const correctionFactor = this.isMobile ? 0.1 : 0.05;     // Less correction for desktop for smoother movement
+    const historyLimit = this.isMobile ? 10 : 15;            // More history points for desktop
+    const renderDelay = this.isMobile ? 150 : 100;           // Less delay for desktop for more responsive feel
 
     // Maintain a history buffer for ball positions
     if (!this.ballHistory) this.ballHistory = [];
     this.ballHistory.push({
-        x: this.latestBallState.x,
-        y: this.latestBallState.y,
-        timestamp: localTime
+      x: this.latestBallState.x,
+      y: this.latestBallState.y,
+      timestamp: time
     });
 
     // Remove old updates (keep only the last 'historyLimit' entries)
     while (this.ballHistory.length > historyLimit) {
-        this.ballHistory.shift();
+      this.ballHistory.shift();
     }
 
     // Apply small client-side delay to smooth interpolation
-    const renderTime = localTime - renderDelay;
+    const renderTime = time - renderDelay;
     let prev = null, curr = null;
 
     for (let i = 0; i < this.ballHistory.length - 1; i++) {
-        if (this.ballHistory[i].timestamp <= renderTime && 
-            this.ballHistory[i + 1].timestamp >= renderTime) {
-            prev = this.ballHistory[i];
-            curr = this.ballHistory[i + 1];
-            break;
-        }
+      if (this.ballHistory[i].timestamp <= renderTime && 
+          this.ballHistory[i + 1].timestamp >= renderTime) {
+        prev = this.ballHistory[i];
+        curr = this.ballHistory[i + 1];
+        break;
+      }
     }
 
     if (prev && curr) {
-        // Time factor for interpolation
-        let t = Phaser.Math.Clamp((renderTime - prev.timestamp) / (curr.timestamp - prev.timestamp), 0, 1);
+      // Time factor for interpolation
+      let t = Phaser.Math.Clamp((renderTime - prev.timestamp) / (curr.timestamp - prev.timestamp), 0, 1);
 
-        // Apply Spline Interpolation for smoother curves
-        let targetX = Phaser.Math.Interpolation.CatmullRom([prev.x, curr.x], t);
-        let targetY = Phaser.Math.Interpolation.CatmullRom([prev.y, curr.y], t);
+      // Apply advanced interpolation based on device type
+      let targetX, targetY;
+      
+      if (this.isMobile || this.ballHistory.length < 4) {
+        // Simple Catmull-Rom for mobile or when we don't have enough points
+        targetX = Phaser.Math.Interpolation.CatmullRom([prev.x, curr.x], t);
+        targetY = Phaser.Math.Interpolation.CatmullRom([prev.y, curr.y], t);
+      } else {
+        // For desktop with enough history points, use full Catmull-Rom spline
+        // Extract points for spline interpolation
+        const xPoints = this.ballHistory.slice(-4).map(p => p.x);
+        const yPoints = this.ballHistory.slice(-4).map(p => p.y);
         
-        // Adaptive smoothing based on ball speed
-        let speed = Math.sqrt((curr.x - prev.x) ** 2 + (curr.y - prev.y) ** 2);
-        let dynamicSmoothing = speed < 5 ? 0.15 : baseSmoothingFactor;
+        // Use Catmull-Rom spline for smoother curves
+        targetX = Phaser.Math.Interpolation.CatmullRom(xPoints, t);
+        targetY = Phaser.Math.Interpolation.CatmullRom(yPoints, t);
+      }
 
-        this.ball.x = Phaser.Math.Linear(this.ball.x, targetX, dynamicSmoothing);
-        this.ball.y = Phaser.Math.Linear(this.ball.y, targetY, dynamicSmoothing);
-        this.ball.setDepth(0);
-        this.ball.setVisible(true);
+      // Adaptive smoothing based on ball speed
+      let speed = Math.sqrt((curr.x - prev.x) ** 2 + (curr.y - prev.y) ** 2);
+      let dynamicSmoothing;
+      
+      if (this.isMobile) {
+        // Mobile smoothing
+        dynamicSmoothing = speed < 5 ? 0.15 : baseSmoothingFactor;
+      } else {
+        // Desktop smoothing - more adaptive based on speed
+        const minSmoothing = 0.05;
+        const maxSmoothing = 0.2;
+        const speedThreshold = 10;
+        
+        // Inverse relationship: faster ball = less smoothing
+        dynamicSmoothing = Math.max(minSmoothing, 
+                                   Math.min(maxSmoothing, 
+                                           maxSmoothing - (speed / speedThreshold) * (maxSmoothing - minSmoothing)));
+      }
+
+      this.ball.x = Phaser.Math.Linear(this.ball.x, targetX, dynamicSmoothing);
+      this.ball.y = Phaser.Math.Linear(this.ball.y, targetY, dynamicSmoothing);
+      this.ball.setDepth(0);
+      this.ball.setVisible(true);
     }
 
-    // Final correction every 80ms to ensure accuracy
-    this.time.delayedCall(80, () => {
-        if (this.latestBallState && !this.latestBallState.grabbed) {
-            this.ball.x = Phaser.Math.Linear(this.ball.x, this.latestBallState.x, correctionFactor);
-            this.ball.y = Phaser.Math.Linear(this.ball.y, this.latestBallState.y, correctionFactor);
-        }
+    // Final correction to ensure accuracy - less frequent on desktop for smoother movement
+    const correctionInterval = this.isMobile ? 80 : 120;
+    this.time.delayedCall(correctionInterval, () => {
+      if (this.latestBallState && !this.latestBallState.grabbed) {
+        this.ball.x = Phaser.Math.Linear(this.ball.x, this.latestBallState.x, correctionFactor);
+        this.ball.y = Phaser.Math.Linear(this.ball.y, this.latestBallState.y, correctionFactor);
+      }
     }, [], this);
   }
 
@@ -1462,17 +1625,19 @@ class MainScene extends Phaser.Scene {
       this.ship.rotation = angle;
     }
     
-    // Update direction indicator
-    this.directionIndicator.clear();
-    this.directionIndicator.lineStyle(3, 0xffffff, 0.8);
-    this.directionIndicator.beginPath();
-    this.directionIndicator.moveTo(this.ship.x, this.ship.y);
-    this.directionIndicator.lineTo(
-      this.ship.x + this.movementDirection.x * 40,
-      this.ship.y + this.movementDirection.y * 40
-    );
-    this.directionIndicator.closePath();
-    this.directionIndicator.strokePath();
+    // Update direction indicator if it exists
+    if (this.directionIndicator) {
+      this.directionIndicator.clear();
+      this.directionIndicator.lineStyle(3, 0xffffff, 0.8);
+      this.directionIndicator.beginPath();
+      this.directionIndicator.moveTo(this.ship.x, this.ship.y);
+      this.directionIndicator.lineTo(
+        this.ship.x + this.movementDirection.x * 40,
+        this.ship.y + this.movementDirection.y * 40
+      );
+      this.directionIndicator.closePath();
+      this.directionIndicator.strokePath();
+    }
     
     // Update player name position
     if (this.playerNameText) {
@@ -1480,221 +1645,26 @@ class MainScene extends Phaser.Scene {
       this.playerNameText.y = this.ship.y - 30;
     }
     
+    // Update rocket cooldown indicator position
+    if (this.rocketCooldownGraphics) {
+      this.updateRocketCooldown();
+    }
+    
+    // Update rocket ready text position
+    if (this.rocketReadyText) {
+      this.rocketReadyText.x = this.ship.x;
+      this.rocketReadyText.y = this.ship.y - 50;
+    }
+    
     // Update boost circle
-    this.updateBoostCircle();
+    if (this.boostCircle) {
+      this.updateBoostCircle();
+    }
     
-    // Process incoming messages from server
-    const messages = this.incomingBuffer.popReady();
-    messages.forEach(data => {
-      try {
-        const msg = JSON.parse(data);
-        
-        // Handle ping response
-        if (msg.type === "pong" && msg.timestamp) {
-          this.pingValue = Date.now() - msg.timestamp;
-          this.pingText.setText("Ping: " + this.pingValue + " ms");
-          return;
-        }
-        
-        // Handle player ID assignment
-        if (msg.your_id !== undefined && this.clientId === null) {
-          this.clientId = msg.your_id;
-          console.log('Assigned player id:', this.clientId);
-          return;
-        }
-        
-        // Handle goal event
-        if (msg.type === "goal") {
-          this.serverState.team1_score = msg.team1_score;
-          this.serverState.team2_score = msg.team2_score;
-          this.updateScoreDisplay();
-          
-          // Show goal animation with team color
-          const scorerTeam = msg.scorer_team;
-          this.showGoalAnimation(scorerTeam);
-          return;
-        }
-        
-        // Handle game state update
-        const serverTimestamp = msg.time;
-        if (!this.serverTimeOffset && serverTimestamp) {
-          this.serverTimeOffset = this.time.now - serverTimestamp;
-        }
-        
-        // Store the latest game state for projectiles
-        this.latestGameState = msg;
-        
-        // Update player positions
-        if (msg.players) {
-          // Update our own ship from server
-          if (msg.players[this.clientId]) {
-            this.serverState.ship = msg.players[this.clientId];
-            this.serverState.boost = msg.players[this.clientId].boost;
-            
-            // Update our own name display
-            if (this.playerNameText && msg.players[this.clientId].display_name) {
-              this.playerNameText.setText(msg.players[this.clientId].display_name);
-            }
-            
-            // Update ship color based on team
-            if (msg.players[this.clientId].team) {
-              if (msg.players[this.clientId].team === 'Red') {
-                this.ship.setTint(0xff0000); // Red tint
-              } else if (msg.players[this.clientId].team === 'Blue') {
-                this.ship.setTint(0x0000ff); // Blue tint
-              }
-              
-              // Update team display
-              this.updateTeamDisplay(msg.players[this.clientId].team);
-            }
-          }
-          
-          // Update other ships
-          for (const id in msg.players) {
-            if (id == this.clientId) continue; // Skip our own ship
-            
-            const shipState = msg.players[id];
-            console.log(`Updating ship for player ${id}:`, shipState);
-            
-            if (!this.otherShips[id]) {
-              console.log(`Creating new ship for player ${id}`);
-              // Create new ship sprite
-              const sprite = this.add.sprite(shipState.x, shipState.y, 'ship')
-                .setScale(0.09)
-                .setOrigin(0.5);
-              
-              // Set ship color based on team
-              if (shipState.team === 'Red') {
-                sprite.setTint(0xff0000); // Red tint
-              } else if (shipState.team === 'Blue') {
-                sprite.setTint(0x0000ff); // Blue tint
-              }
-              
-              // Store the current team for change detection
-              sprite.team = shipState.team;
-              sprite.currentTeam = shipState.team;
-              
-              // Add player name text above ship
-              const nameText = this.add.text(shipState.x, shipState.y - 30, 
-                shipState.display_name || `Player ${id}`, 
-                { fontSize: '14px', fill: '#fff', stroke: '#000', strokeThickness: 3 }
-              ).setOrigin(0.5);
-              
-              sprite.nameText = nameText;
-              sprite.history = [{ x: shipState.x, y: shipState.y, timestamp: serverTimestamp }];
-              this.otherShips[id] = sprite;
-              
-              // Add rocket cooldown indicator for other ships
-              sprite.rocketCooldownGraphics = this.add.graphics();
-              sprite.rocketReadyText = this.add.text(shipState.x, shipState.y - 50, "🚀", 
-                { fontSize: '16px' }
-              ).setOrigin(0.5).setVisible(false);
-            } else {
-              // Update existing ship
-              const sprite = this.otherShips[id];
-              
-              // Update player name if it changed
-              if (sprite.nameText) {
-                sprite.nameText.setText(shipState.display_name || `Player ${id}`);
-              }
-              
-              // Update team if it changed
-              if (sprite.team !== shipState.team) {
-                sprite.team = shipState.team;
-                
-                // Update ship color based on team
-                if (shipState.team === 'Red') {
-                  sprite.setTint(0xff0000); // Red tint
-                } else if (shipState.team === 'Blue') {
-                  sprite.setTint(0x0000ff); // Blue tint
-                }
-              }
-              
-              // Update ship history for interpolation
-              if (!sprite.history) sprite.history = [];
-              sprite.history.push({ x: shipState.x, y: shipState.y, timestamp: serverTimestamp });
-              
-              // Keep history limited to prevent memory issues
-              while (sprite.history.length > 10) {
-                sprite.history.shift();
-              }
-            }
-          }
-          
-          // Clean up ships that are no longer in the game state
-          for (const id in this.otherShips) {
-            if (!msg.players[id]) {
-              // Remove ship that's no longer in the game
-              if (this.otherShips[id].nameText) {
-                this.otherShips[id].nameText.destroy();
-              }
-              
-              // Clean up rocket cooldown graphics and text
-              if (this.otherShips[id].rocketCooldownGraphics) {
-                this.otherShips[id].rocketCooldownGraphics.destroy();
-              }
-              if (this.otherShips[id].rocketReadyText) {
-                // Stop any active tween before destroying
-                if (this.otherShips[id].rocketReadyTween && this.otherShips[id].rocketReadyTween.isPlaying()) {
-                  this.otherShips[id].rocketReadyTween.stop();
-                }
-                this.otherShips[id].rocketReadyText.destroy();
-              }
-              
-              this.otherShips[id].destroy();
-              delete this.otherShips[id];
-            }
-          }
-        }
-        
-        // Update ball state
-        if (msg.ball) {
-          if (msg.ball.active) {
-            msg.ball.timestamp = serverTimestamp;
-            this.latestBallState = msg.ball;
-            
-            // Store ball properties for use in updateBoostCircle
-            if (!this.ball) {
-              this.ball = this.add.sprite(400, 300, 'ball');
-              this.ball.setDepth(5);
-            }
-            this.ball.grabbed = msg.ball.grabbed;
-            this.ball.owner = msg.ball.owner;
-            
-            // Debug log for ball owner
-            console.log('Ball owner:', msg.ball.owner, 'Client ID:', this.clientId);
-            
-            if (!this.ballHistory) this.ballHistory = [];
-            this.ballHistory.push(msg.ball);
-            if (this.ballHistory.length > 10) this.ballHistory.shift();
-            
-            // Make the ball visible if it wasn't already
-            if (!this.ball.visible) {
-              this.ball.setVisible(true);
-            }
-          } else {
-            this.ballHistory = [];
-            this.latestBallState = null;
-            
-            // Hide the ball
-            if (this.ball && this.ball.visible) {
-              this.ball.setVisible(false);
-            }
-          }
-        }
-        
-        // Update scores
-        if (msg.team1_score !== undefined && msg.team2_score !== undefined) {
-          this.serverState.team1_score = msg.team1_score;
-          this.serverState.team2_score = msg.team2_score;
-          this.updateScoreDisplay();
-        }
-      } catch (error) {
-        console.error('Error processing message:', error);
-      }
-    });
+    // Process incoming messages
+    this.processIncomingMessages();
     
-    // Update other ships
+    // Update remote ships - use the Phaser time parameter for smooth interpolation
     this.updateRemoteShips(time);
     
     // Update ball position
@@ -1703,17 +1673,22 @@ class MainScene extends Phaser.Scene {
     // Update projectiles
     this.updateProjectiles(time, delta);
     
-    // Generate particles
+    // Update controller input
+    this.updateControllerInput();
+    
+    // Update joystick input for mobile
+    if (this.isMobile && this.joystick) {
+      this.updateJoystickInput();
+    }
+    
+    // Generate particles based on ship movement
     this.generateParticles();
     
     // Update camera position
     this.updateCamera();
     
-    // Update controller input
-    this.updateControllerInput();
-    
-    // Update rocket cooldown indicator
-    this.updateRocketCooldown();
+    // Send input to server
+    this.sendInput();
   }
 
   // Add method to play projectile fired effect
@@ -2108,71 +2083,42 @@ class MainScene extends Phaser.Scene {
   }
 
   shutdown() {
+    console.log('Game shutting down, cleaning up resources');
+    
+    // Clean up connection
+    this.cleanupConnection();
+    
+    // Close socket connection
+    if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
+        console.log('Closing game socket on shutdown');
+        this.socket.close();
+        this.socket = null;
+    }
+    
+    // Reset global connection tracking
+    window.gameSocket = null;
+    window.activeConnections = 0;
+    
+    // Remove any UI elements we created
+    const errorDiv = document.getElementById('connection-error');
+    if (errorDiv) {
+        errorDiv.remove();
+    }
+    
     // Clean up WebSocket connection
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.close();
+        this.socket.close();
     }
     
-    // Clean up ping interval
+    // Clear intervals
     if (this.pingInterval) {
-      clearInterval(this.pingInterval);
+        clearInterval(this.pingInterval);
     }
     
-    // Clean up other ships and their name texts
-    for (const id in this.otherShips) {
-      if (this.otherShips[id].nameText) {
-        this.otherShips[id].nameText.destroy();
-      }
-      
-      // Clean up rocket cooldown indicators
-      if (this.otherShips[id].rocketCooldownGraphics) {
-        this.otherShips[id].rocketCooldownGraphics.destroy();
-      }
-      if (this.otherShips[id].rocketReadyText) {
-        // Stop any active tween before destroying
-        if (this.otherShips[id].rocketReadyTween && this.otherShips[id].rocketReadyTween.isPlaying()) {
-          this.otherShips[id].rocketReadyTween.stop();
-        }
-        this.otherShips[id].rocketReadyText.destroy();
-      }
-      
-      this.otherShips[id].destroy();
+    // Clear any pending timeouts
+    if (this.connectionTimeout) {
+        clearTimeout(this.connectionTimeout);
     }
-    
-    // Clean up player name text
-    if (this.playerNameText) {
-      this.playerNameText.destroy();
-    }
-    
-    // Clean up player's rocket cooldown indicators
-    if (this.rocketCooldownGraphics) {
-      this.rocketCooldownGraphics.destroy();
-    }
-    if (this.rocketReadyText) {
-      if (this.rocketReadyTween && this.rocketReadyTween.isPlaying()) {
-        this.rocketReadyTween.stop();
-      }
-      this.rocketReadyText.destroy();
-    }
-    
-    // Clean up UI elements
-    if (this.scoreLabel) this.scoreLabel.destroy();
-    if (this.redScoreText) this.redScoreText.destroy();
-    if (this.scoreSeparator) this.scoreSeparator.destroy();
-    if (this.blueScoreText) this.blueScoreText.destroy();
-    
-    // Remove resize listener
-    this.scale.off('resize', this.handleResize, this);
-    
-    this.otherShips = {};
-    
-    // Clean up controller event listeners
-    window.removeEventListener('gamepadconnected', this.handleGamepadConnected);
-    window.removeEventListener('gamepaddisconnected', this.handleGamepadDisconnected);
-    
-    // Reset controller state
-    this.controllers = {};
-    this.controllerConnected = false;
   }
 
   // Add team switching method
@@ -2882,6 +2828,273 @@ class MainScene extends Phaser.Scene {
         sprite.rocketCooldownGraphics.strokePath();
       }
     }
+  }
+
+  // Add a method to show connection errors
+  showConnectionError(message) {
+    // Remove any existing error message
+    const existingError = document.getElementById('connection-error');
+    if (existingError) {
+        existingError.remove();
+    }
+    
+    // Create error message element
+    const errorDiv = document.createElement('div');
+    errorDiv.id = 'connection-error';
+    errorDiv.style.position = 'absolute';
+    errorDiv.style.top = '50%';
+    errorDiv.style.left = '50%';
+    errorDiv.style.transform = 'translate(-50%, -50%)';
+    errorDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+    errorDiv.style.color = 'white';
+    errorDiv.style.padding = '20px';
+    errorDiv.style.borderRadius = '10px';
+    errorDiv.style.textAlign = 'center';
+    errorDiv.style.zIndex = '1000';
+    errorDiv.style.maxWidth = '80%';
+    
+    // Add message and refresh button
+    errorDiv.innerHTML = `
+        <p>${message}</p>
+        <button id="refresh-button" style="
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 10px 2px;
+            cursor: pointer;
+            border-radius: 5px;">
+            Refresh Page
+        </button>
+    `;
+    
+    // Add to document
+    document.body.appendChild(errorDiv);
+    
+    // Add refresh button event listener
+    document.getElementById('refresh-button').addEventListener('click', () => {
+        window.location.reload();
+    });
+  }
+
+  // Process incoming messages from the server
+  processIncomingMessages() {
+    // Check if incomingBuffer exists
+    if (!this.incomingBuffer) return;
+    
+    const messages = this.incomingBuffer.popReady();
+    if (!messages || messages.length === 0) return;
+    
+    messages.forEach(data => {
+      try {
+        const msg = JSON.parse(data);
+        
+        // Handle ping response
+        if (msg.type === "pong" && msg.timestamp) {
+          this.pingValue = Date.now() - msg.timestamp;
+          if (this.pingText) {
+            this.pingText.setText("Ping: " + this.pingValue + " ms");
+          }
+          return;
+        }
+        
+        // Handle player ID assignment
+        if (msg.your_id !== undefined && this.clientId === null) {
+          this.clientId = msg.your_id;
+          console.log('Assigned player id:', this.clientId);
+          return;
+        }
+        
+        // Handle goal event
+        if (msg.type === "goal") {
+          this.serverState.team1_score = msg.team1_score;
+          this.serverState.team2_score = msg.team2_score;
+          this.updateScoreDisplay();
+          
+          // Show goal animation with team color
+          const scorerTeam = msg.scorer_team;
+          this.showGoalAnimation(scorerTeam);
+          return;
+        }
+        
+        // Handle game state update
+        const serverTimestamp = msg.time;
+        if (!this.serverTimeOffset && serverTimestamp) {
+          this.serverTimeOffset = this.time.now - serverTimestamp;
+        }
+        
+        // Store the latest game state for projectiles
+        this.latestGameState = msg;
+        
+        // Update player positions
+        if (msg.players) {
+          // Update our own ship from server
+          if (msg.players[this.clientId]) {
+            this.serverState.ship = msg.players[this.clientId];
+            this.serverState.boost = msg.players[this.clientId].boost;
+            
+            // Update our own name display
+            if (this.playerNameText && msg.players[this.clientId].display_name) {
+              this.playerNameText.setText(msg.players[this.clientId].display_name);
+            }
+            
+            // Update ship color based on team
+            if (msg.players[this.clientId].team) {
+              if (msg.players[this.clientId].team === 'Red') {
+                this.ship.setTint(0xff0000); // Red tint
+              } else if (msg.players[this.clientId].team === 'Blue') {
+                this.ship.setTint(0x0000ff); // Blue tint
+              }
+              
+              // Update team display
+              this.updateTeamDisplay(msg.players[this.clientId].team);
+            }
+          }
+          
+          // Update other ships
+          for (const id in msg.players) {
+            if (id == this.clientId) continue; // Skip our own ship
+            
+            const shipState = msg.players[id];
+            
+            if (!this.otherShips[id]) {
+              console.log(`Creating new ship for player ${id}`);
+              // Create new ship sprite
+              const sprite = this.add.sprite(shipState.x, shipState.y, 'ship')
+                .setScale(0.09)
+                .setOrigin(0.5);
+              
+              // Set ship color based on team
+              if (shipState.team === 'Red') {
+                sprite.setTint(0xff0000); // Red tint
+              } else if (shipState.team === 'Blue') {
+                sprite.setTint(0x0000ff); // Blue tint
+              }
+              
+              // Store the current team for change detection
+              sprite.team = shipState.team;
+              sprite.currentTeam = shipState.team;
+              
+              // Add player name text above ship
+              const nameText = this.add.text(shipState.x, shipState.y - 30, 
+                shipState.display_name || `Player ${id}`, 
+                { fontSize: '14px', fill: '#fff', stroke: '#000', strokeThickness: 3 }
+              ).setOrigin(0.5);
+              
+              sprite.nameText = nameText;
+              sprite.history = [{ x: shipState.x, y: shipState.y, timestamp: serverTimestamp }];
+              this.otherShips[id] = sprite;
+              
+              // Add rocket cooldown indicator for other ships
+              sprite.rocketCooldownGraphics = this.add.graphics();
+              sprite.rocketReadyText = this.add.text(shipState.x, shipState.y - 50, "🚀", 
+                { fontSize: '16px' }
+              ).setOrigin(0.5).setVisible(false);
+            } else {
+              // Update existing ship
+              const sprite = this.otherShips[id];
+              
+              // Update player name if it changed
+              if (sprite.nameText) {
+                sprite.nameText.setText(shipState.display_name || `Player ${id}`);
+              }
+              
+              // Update team if it changed
+              if (sprite.team !== shipState.team) {
+                sprite.team = shipState.team;
+                
+                // Update ship color based on team
+                if (shipState.team === 'Red') {
+                  sprite.setTint(0xff0000); // Red tint
+                } else if (shipState.team === 'Blue') {
+                  sprite.setTint(0x0000ff); // Blue tint
+                }
+              }
+              
+              // Update ship history for interpolation
+              if (!sprite.history) sprite.history = [];
+              sprite.history.push({ x: shipState.x, y: shipState.y, timestamp: serverTimestamp });
+              
+              // Keep history limited to prevent memory issues
+              while (sprite.history.length > 10) {
+                sprite.history.shift();
+              }
+            }
+          }
+          
+          // Clean up ships that are no longer in the game state
+          for (const id in this.otherShips) {
+            if (!msg.players[id]) {
+              // Remove ship that's no longer in the game
+              if (this.otherShips[id].nameText) {
+                this.otherShips[id].nameText.destroy();
+              }
+              
+              // Clean up rocket cooldown graphics and text
+              if (this.otherShips[id].rocketCooldownGraphics) {
+                this.otherShips[id].rocketCooldownGraphics.destroy();
+              }
+              if (this.otherShips[id].rocketReadyText) {
+                // Stop any active tween before destroying
+                if (this.otherShips[id].rocketReadyTween && this.otherShips[id].rocketReadyTween.isPlaying()) {
+                  this.otherShips[id].rocketReadyTween.stop();
+                }
+                this.otherShips[id].rocketReadyText.destroy();
+              }
+              
+              this.otherShips[id].destroy();
+              delete this.otherShips[id];
+            }
+          }
+        }
+        
+        // Update ball state
+        if (msg.ball) {
+          if (msg.ball.active) {
+            msg.ball.timestamp = serverTimestamp;
+            this.latestBallState = msg.ball;
+            
+            // Store ball properties for use in updateBoostCircle
+            if (!this.ball) {
+              this.ball = this.add.sprite(400, 300, 'ball');
+              this.ball.setDepth(5);
+            }
+            this.ball.grabbed = msg.ball.grabbed;
+            this.ball.owner = msg.ball.owner;
+            
+            if (!this.ballHistory) this.ballHistory = [];
+            this.ballHistory.push(msg.ball);
+            if (this.ballHistory.length > 10) this.ballHistory.shift();
+            
+            // Make the ball visible if it wasn't already
+            if (!this.ball.visible) {
+              this.ball.setVisible(true);
+            }
+          } else {
+            this.ballHistory = [];
+            this.latestBallState = null;
+            
+            // Hide the ball
+            if (this.ball && this.ball.visible) {
+              this.ball.setVisible(false);
+            }
+          }
+        }
+        
+        // Update scores
+        if (msg.team1_score !== undefined && msg.team2_score !== undefined) {
+          this.serverState.team1_score = msg.team1_score;
+          this.serverState.team2_score = msg.team2_score;
+          this.updateScoreDisplay();
+        }
+      } catch (error) {
+        console.error('Error processing message:', error);
+      }
+    });
   }
 }
   

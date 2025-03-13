@@ -217,11 +217,26 @@
     
     // Detect if we're on a mobile browser
     function isMobileBrowser() {
-      const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-      if (mobile) {
-        debugLog('Mobile browser detected');
+      // Check for mobile user agents
+      const userAgentCheck = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      
+      // Check for touch capabilities
+      const hasTouchCapabilities = (
+        'ontouchstart' in window || 
+        navigator.maxTouchPoints > 0 || 
+        navigator.msMaxTouchPoints > 0
+      );
+      
+      // Consider a device mobile if it has a mobile user agent OR touch capabilities
+      const isMobile = userAgentCheck || hasTouchCapabilities;
+      
+      if (isMobile) {
+        debugLog('Mobile/touch device detected');
+        if (hasTouchCapabilities) debugLog('Touch capabilities detected');
+        if (userAgentCheck) debugLog('Mobile user agent detected');
       }
-      return mobile;
+      
+      return isMobile;
     }
     
     // DOM elements
@@ -297,6 +312,7 @@
       if (socket) {
         debugLog('Closing existing socket');
         socket.close();
+        socket = null;
       }
       
       // Clear any existing ping interval
@@ -311,174 +327,191 @@
       
       debugLog('Connecting to WebSocket at:', wsUrl);
       
-      try {
-        socket = new WebSocket(wsUrl);
-      } catch (error) {
-        debugLog('Error creating WebSocket:', error);
-        connectionStatus.textContent = 'Failed to create connection';
-        connectionStatus.className = 'status error';
-        return;
-      }
-      
-      // Reset connection state
-      connectionLost = false;
-      lastPingTime = 0;
-      lastPongTime = 0;
-      
-      // Set a connection timeout
-      const connectionTimeout = setTimeout(() => {
-        if (socket && socket.readyState !== WebSocket.OPEN) {
-          debugLog('WebSocket connection timeout');
-          socket.close();
-        }
-      }, 10000);
-      
-      // Connection opened
-      socket.addEventListener('open', () => {
-        debugLog('WebSocket connection opened successfully');
-        clearTimeout(connectionTimeout);
-        connectionStatus.textContent = 'Connected to lobby server';
-        connectionStatus.className = 'status success';
-        reconnectAttempts = 0;
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
-        
-        // Enable buttons
-        createGameBtn.disabled = false;
-        refreshGamesBtn.disabled = false;
-        
-        // Request the list of available games
-        refreshGameList();
-        
-        // Start sending regular pings to keep the connection alive
-        const pingFrequency = isMobileBrowser() ? 2000 : 15000; // More frequent pings for mobile
-        debugLog(`Setting up ping interval every ${pingFrequency}ms`);
-        
-        pingInterval = setInterval(() => {
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            // Check if we've received a pong since our last ping
-            const now = Date.now();
-            if (lastPingTime > 0 && lastPongTime < lastPingTime && now - lastPingTime > 10000) {
-              debugLog('No pong received for last ping, connection may be dead');
-              if (!connectionLost) {
-                connectionLost = true;
-                // Force reconnect
-                debugLog('Forcing reconnect due to missing pong');
-                socket.close();
-                connectToLobby();
+      // Add a pre-connection delay for mobile devices to ensure network is ready
+      const connectWithRetry = () => {
+        try {
+          socket = new WebSocket(wsUrl);
+          
+          // Set a longer connection timeout for mobile devices
+          const timeoutDuration = isMobileBrowser() ? 15000 : 10000;
+          const connectionTimeout = setTimeout(() => {
+            if (socket && socket.readyState !== WebSocket.OPEN) {
+              debugLog('WebSocket connection timeout');
+              socket.close();
+              socket = null;
+              
+              // Try again with a short delay
+              setTimeout(connectWithRetry, 1000);
+            }
+          }, timeoutDuration);
+          
+          // Connection opened
+          socket.addEventListener('open', () => {
+            debugLog('WebSocket connection opened successfully');
+            clearTimeout(connectionTimeout);
+            connectionStatus.textContent = 'Connected to lobby server';
+            connectionStatus.className = 'status success';
+            reconnectAttempts = 0;
+            if (reconnectTimer) {
+              clearTimeout(reconnectTimer);
+              reconnectTimer = null;
+            }
+            
+            // Enable buttons
+            createGameBtn.disabled = false;
+            refreshGamesBtn.disabled = false;
+            
+            // Request the list of available games
+            refreshGameList();
+            
+            // Start sending regular pings to keep the connection alive
+            const pingFrequency = isMobileBrowser() ? 2000 : 15000; // More frequent pings for mobile
+            debugLog(`Setting up ping interval every ${pingFrequency}ms`);
+            
+            pingInterval = setInterval(() => {
+              if (socket && socket.readyState === WebSocket.OPEN) {
+                // Check if we've received a pong since our last ping
+                const now = Date.now();
+                if (lastPingTime > 0 && lastPongTime < lastPingTime && now - lastPingTime > 10000) {
+                  debugLog('No pong received for last ping, connection may be dead');
+                  if (!connectionLost) {
+                    connectionLost = true;
+                    // Force reconnect
+                    debugLog('Forcing reconnect due to missing pong');
+                    if (socket) {
+                      socket.close();
+                      socket = null;
+                    }
+                    connectToLobby();
+                    return;
+                  }
+                }
+                
+                // Send a ping message
+                lastPingTime = now;
+                try {
+                  socket.send(JSON.stringify({ type: "ping", timestamp: now }));
+                  debugLog('Sent ping to server');
+                } catch (e) {
+                  debugLog('Error sending ping:', e);
+                }
+              }
+            }, pingFrequency);
+            
+            // Send an initial ping
+            lastPingTime = Date.now();
+            socket.send(JSON.stringify({ type: "ping", timestamp: lastPingTime }));
+            debugLog('Sent initial ping to server');
+          });
+          
+          // Listen for messages
+          socket.addEventListener('message', (event) => {
+            try {
+              debugLog('Received message:', event.data.substring(0, 100) + (event.data.length > 100 ? '...' : ''));
+              
+              // Handle simple ping-pong for connection testing
+              if (event.data === 'pong' || event.data === 'ping') {
+                debugLog('Received ping/pong from server');
+                lastPongTime = Date.now();
                 return;
               }
+              
+              // Handle connected message
+              if (event.data === 'connected') {
+                debugLog('Received connected confirmation from server');
+                return;
+              }
+              
+              // Try to parse as JSON
+              try {
+                const message = JSON.parse(event.data);
+                
+                // Handle ping response
+                if (message.type === "pong") {
+                  debugLog('Received pong from server');
+                  lastPongTime = Date.now();
+                  return;
+                }
+                
+                // Handle heartbeat
+                if (message.type === "heartbeat") {
+                  debugLog('Received heartbeat from server');
+                  // Send a ping back to acknowledge
+                  socket.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
+                  return;
+                }
+                
+                handleLobbyMessage(message);
+              } catch (jsonError) {
+                debugLog('Received non-JSON message:', event.data);
+              }
+            } catch (error) {
+              debugLog('Error handling message:', error);
+              showNotification('Error handling server message', true);
+            }
+          });
+          
+          // Connection closed
+          socket.addEventListener('close', (event) => {
+            debugLog('WebSocket connection closed', event.code, event.reason);
+            clearTimeout(connectionTimeout);
+            
+            // Clear ping interval
+            if (pingInterval) {
+              clearInterval(pingInterval);
+              pingInterval = null;
             }
             
-            // Send a ping message
-            lastPingTime = now;
-            try {
-              socket.send(JSON.stringify({ type: "ping", timestamp: now }));
-              debugLog('Sent ping to server');
-            } catch (e) {
-              debugLog('Error sending ping:', e);
-            }
-          }
-        }, pingFrequency);
-        
-        // Send an initial ping
-        lastPingTime = Date.now();
-        socket.send(JSON.stringify({ type: "ping", timestamp: lastPingTime }));
-        debugLog('Sent initial ping to server');
-      });
-      
-      // Listen for messages
-      socket.addEventListener('message', (event) => {
-        try {
-          debugLog('Received message:', event.data.substring(0, 100) + (event.data.length > 100 ? '...' : ''));
-          
-          // Handle simple ping-pong for connection testing
-          if (event.data === 'pong' || event.data === 'ping') {
-            debugLog('Received ping/pong from server');
-            lastPongTime = Date.now();
-            return;
-          }
-          
-          // Handle connected message
-          if (event.data === 'connected') {
-            debugLog('Received connected confirmation from server');
-            return;
-          }
-          
-          // Try to parse as JSON
-          try {
-            const message = JSON.parse(event.data);
+            connectionStatus.textContent = 'Disconnected from lobby server';
+            connectionStatus.className = 'status error';
             
-            // Handle ping response
-            if (message.type === "pong") {
-              debugLog('Received pong from server');
-              lastPongTime = Date.now();
+            // Disable buttons
+            createGameBtn.disabled = true;
+            refreshGamesBtn.disabled = true;
+            
+            // Don't reconnect if the close was clean and intentional
+            if (event.wasClean && (event.code === 1000 || event.code === 1001)) {
+              debugLog('Clean connection close, not reconnecting');
               return;
             }
             
-            // Handle heartbeat
-            if (message.type === "heartbeat") {
-              debugLog('Received heartbeat from server');
-              // Send a ping back to acknowledge
-              socket.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
-              return;
+            // Try to reconnect
+            if (reconnectAttempts < maxReconnectAttempts) {
+              reconnectAttempts++;
+              const delay = isMobileBrowser() ? 1000 * reconnectAttempts : 2000 * reconnectAttempts;
+              debugLog(`Will reconnect in ${delay}ms (attempt ${reconnectAttempts})`);
+              showNotification(`Connection lost. Reconnecting in ${delay/1000} seconds...`, true);
+              reconnectTimer = setTimeout(connectToLobby, delay);
+            } else {
+              debugLog('Max reconnect attempts reached');
+              showNotification('Could not reconnect to server. Please refresh the page.', true);
             }
-            
-            handleLobbyMessage(message);
-          } catch (jsonError) {
-            debugLog('Received non-JSON message:', event.data);
-          }
+          });
+          
+          // Connection error
+          socket.addEventListener('error', (error) => {
+            debugLog('WebSocket error:', error);
+            connectionStatus.textContent = 'Connection error';
+            connectionStatus.className = 'status error';
+          });
         } catch (error) {
-          debugLog('Error handling message:', error);
-          showNotification('Error handling server message', true);
-        }
-      });
-      
-      // Connection closed
-      socket.addEventListener('close', (event) => {
-        debugLog('WebSocket connection closed', event.code, event.reason);
-        clearTimeout(connectionTimeout);
-        
-        // Clear ping interval
-        if (pingInterval) {
-          clearInterval(pingInterval);
-          pingInterval = null;
-        }
-        
-        connectionStatus.textContent = 'Disconnected from lobby server';
-        connectionStatus.className = 'status error';
-        
-        // Disable buttons
-        createGameBtn.disabled = true;
-        refreshGamesBtn.disabled = true;
-        
-        // Don't reconnect if the close was clean and intentional
-        if (event.wasClean && (event.code === 1000 || event.code === 1001)) {
-          debugLog('Clean connection close, not reconnecting');
+          debugLog('Error creating WebSocket:', error);
+          connectionStatus.textContent = 'Failed to create connection';
+          connectionStatus.className = 'status error';
+          
+          // Try again after a short delay
+          setTimeout(connectWithRetry, 2000);
           return;
         }
-        
-        // Try to reconnect
-        if (reconnectAttempts < maxReconnectAttempts) {
-          reconnectAttempts++;
-          const delay = isMobileBrowser() ? 1000 * reconnectAttempts : 2000 * reconnectAttempts;
-          debugLog(`Will reconnect in ${delay}ms (attempt ${reconnectAttempts})`);
-          showNotification(`Connection lost. Reconnecting in ${delay/1000} seconds...`, true);
-          reconnectTimer = setTimeout(connectToLobby, delay);
-        } else {
-          debugLog('Max reconnect attempts reached');
-          showNotification('Could not reconnect to server. Please refresh the page.', true);
-        }
-      });
+      };
       
-      // Connection error
-      socket.addEventListener('error', (error) => {
-        debugLog('WebSocket error:', error);
-        connectionStatus.textContent = 'Connection error';
-        connectionStatus.className = 'status error';
-      });
+      // For mobile devices, add a small delay before connecting to ensure network is ready
+      if (isMobileBrowser()) {
+        debugLog('Mobile device detected, adding pre-connection delay');
+        setTimeout(connectWithRetry, 500);
+      } else {
+        connectWithRetry();
+      }
     }
     
     // Handle messages from the lobby server
@@ -488,22 +521,60 @@
       switch (message.type) {
         case 'game_list':
           updateGameList(message.games);
+          
+          // Auto-join for mobile: If we're on mobile, either join an existing game or create a new one
+          if (isMobileBrowser()) {
+            console.log('Mobile auto-join: Processing game list');
+            
+            // Check if there are any available games to join
+            if (message.games && message.games.length > 0) {
+              // Find the first game that isn't full
+              const availableGame = message.games.find(game => game.player_count < game.max_players);
+              if (availableGame) {
+                console.log('Mobile auto-join: Joining first available game:', availableGame.name);
+                joinGame(availableGame.id);
+                return; // Exit early to prevent further processing
+              }
+            }
+            
+            // No available games, create a new one
+            console.log('Mobile auto-join: No available games, creating a new one');
+            
+            // Set a default game name if none is provided
+            if (!gameNameInput.value.trim()) {
+              const randomNum = Math.floor(Math.random() * 1000);
+              gameNameInput.value = `Mobile Game ${randomNum}`;
+            }
+            
+            // Create the game
+            createGame();
+          }
           break;
           
         case 'game_created':
-          showNotification(`Game created! Redirecting to game...`);
-          // Redirect to the game page with the game ID and port
-          setTimeout(() => {
-            window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}`;
-          }, 1000);
+          // For mobile, redirect immediately to reduce connection issues
+          if (isMobileBrowser()) {
+            console.log('Mobile: Redirecting immediately to game after creation');
+            window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}&auto_start=true`;
+          } else {
+            showNotification(`Game created! Redirecting to game...`);
+            setTimeout(() => {
+              window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}`;
+            }, 1000);
+          }
           break;
           
         case 'game_joined':
-          showNotification(`Joined game! Redirecting...`);
-          // Redirect to the game page with the game ID and port
-          setTimeout(() => {
-            window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}`;
-          }, 1000);
+          // For mobile, redirect immediately to reduce connection issues
+          if (isMobileBrowser()) {
+            console.log('Mobile: Redirecting immediately to game after joining');
+            window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}&auto_start=true`;
+          } else {
+            showNotification(`Joined game! Redirecting...`);
+            setTimeout(() => {
+              window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}`;
+            }, 1000);
+          }
           break;
           
         case 'error':
@@ -667,8 +738,59 @@
       document.getElementById('quick-play-btn').addEventListener('click', function() {
         const displayName = document.getElementById('display-name').value.trim() || "Player";
         localStorage.setItem('playerDisplayName', displayName);
-        window.location.href = `game.html?display_name=${encodeURIComponent(displayName)}`;
+        
+        // Instead of just redirecting, let's try to join an existing game or create a new one
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          // Check if there are any available games to join
+          const gameItems = Array.from(gameList.children);
+          const availableGames = gameItems.filter(item => 
+            !item.textContent.includes('No games available') && 
+            !item.querySelector('button').disabled
+          );
+          
+          if (availableGames.length > 0) {
+            // Find the first game with available slots
+            const gameToJoin = availableGames[0];
+            const joinButton = gameToJoin.querySelector('button');
+            
+            // Simulate clicking the join button
+            console.log('Quick Play: Joining existing game');
+            joinButton.click();
+          } else {
+            // No available games, create a new one
+            console.log('Quick Play: Creating new game');
+            
+            // Set a default game name if none is provided
+            if (!gameNameInput.value.trim()) {
+              const randomNum = Math.floor(Math.random() * 1000);
+              gameNameInput.value = `Quick Game ${randomNum}`;
+            }
+            
+            // Create the game
+            createGame();
+          }
+          
+          // Show notification
+          showNotification('Quick Play: Starting game...', false, 'loading');
+        } else {
+          // Fallback to direct redirect if not connected
+          console.log('Quick Play: Not connected to server, redirecting directly');
+          // Add auto_start=true parameter to indicate the game should start automatically
+          window.location.href = `game.html?display_name=${encodeURIComponent(displayName)}&auto_start=true`;
+        }
       });
+      
+      // For mobile devices, auto-click the Quick Play button after a short delay
+      if (isMobileBrowser()) {
+        // Add a message to inform the user
+        showNotification('Mobile detected: Starting game automatically...', false);
+        
+        // Directly click the Quick Play button after a short delay
+        setTimeout(() => {
+          console.log('Mobile auto-start: Clicking Quick Play button');
+          document.getElementById('quick-play-btn').click();
+        }, 1000); // Reduced from 2000ms to 1000ms for faster startup
+      }
     }
     
     // Connect to the lobby server when the page loads

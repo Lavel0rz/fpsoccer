@@ -231,6 +231,12 @@
     console.log('Game page loaded');
     console.log('URL parameters:', window.location.search);
     
+    // Initialize global connection tracking
+    window.activeConnections = 0;
+    window.gameSocket = null;
+    window.testSocket = null;
+    window.connectionInProgress = false;
+    
     // Initialize team buttons
     window.addEventListener('load', function() {
       console.log('Page fully loaded, initializing team buttons');
@@ -256,6 +262,7 @@
     const gameId = urlParams.get('game_id');
     const port = urlParams.get('port') || '8080';
     const displayName = urlParams.get('display_name') || localStorage.getItem('playerDisplayName') || 'Player';
+    const autoStart = urlParams.get('auto_start') === 'true';
     
     // Store the display name in localStorage for future use
     localStorage.setItem('playerDisplayName', displayName);
@@ -263,6 +270,7 @@
     console.log('Game ID:', gameId);
     console.log('Port:', port);
     console.log('Display Name:', displayName);
+    console.log('Auto Start:', autoStart);
     
     // Make the display name available to the game
     window.PLAYER_DISPLAY_NAME = displayName;
@@ -295,60 +303,200 @@
     
     // Test connection to the game server
     function testConnection() {
+      // Prevent multiple simultaneous connection attempts
+      if (window.connectionInProgress) {
+        console.log('Connection test already in progress, skipping');
+        return;
+      }
+      
+      window.connectionInProgress = true;
       connectionStatus.style.display = 'block';
       connectionStatus.textContent = 'Testing connection to game server...';
       connectionStatus.className = 'status loading';
       
       console.log('Attempting to connect to:', window.WEBSOCKET_URL);
       
-      const testSocket = new WebSocket(window.WEBSOCKET_URL);
-      let connectionTimeout = setTimeout(() => {
-        testSocket.close();
-        connectionStatus.textContent = 'Connection timeout. The server might still be starting up. Retrying...';
+      // Close any existing test socket
+      if (window.testSocket && window.testSocket.readyState !== WebSocket.CLOSED) {
+        console.log('Closing existing test socket');
+        window.testSocket.close();
+        window.testSocket = null;
+      }
+      
+      // Add a delay before the first connection attempt to give the server time to start
+      const initialDelay = isMobileBrowser() ? 3000 : 2000; // Longer delay for mobile
+      console.log(`Waiting ${initialDelay/1000} seconds before first connection attempt...`);
+      
+      setTimeout(() => {
+        attemptConnection(1); // Start with attempt #1
+      }, initialDelay);
+    }
+    
+    // Attempt connection with exponential backoff
+    function attemptConnection(attemptNumber) {
+      // Limit the number of attempts
+      if (attemptNumber > 5) {
+        console.log('Maximum connection attempts reached');
+        connectionStatus.textContent = 'Could not connect after multiple attempts. Please refresh the page.';
+        connectionStatus.className = 'status error';
+        startButton.disabled = true;
+        window.connectionInProgress = false;
+        return;
+      }
+      
+      console.log(`Connection attempt #${attemptNumber} (Active connections: ${window.activeConnections})`);
+      connectionStatus.textContent = `Connection attempt #${attemptNumber}...`;
+      
+      try {
+        // Increment active connections counter
+        window.activeConnections++;
+        console.log(`Incremented active connections to ${window.activeConnections}`);
+        
+        const testSocket = new WebSocket(window.WEBSOCKET_URL);
+        window.testSocket = testSocket; // Store reference for cleanup
+        
+        // Increase timeout for later attempts
+        const timeoutDuration = Math.min(5000 + (attemptNumber * 1000), 15000);
+        
+        let connectionTimeout = setTimeout(() => {
+          if (testSocket.readyState !== WebSocket.OPEN) {
+            console.log(`Connection timeout after ${timeoutDuration/1000} seconds, closing socket`);
+            
+            // Clean up this connection attempt
+            cleanupTestConnection(testSocket, connectionTimeout);
+            
+            connectionStatus.textContent = `Connection attempt #${attemptNumber} timed out. Retrying...`;
+            connectionStatus.className = 'status error';
+            startButton.disabled = true;
+            
+            // Exponential backoff for retry
+            const retryDelay = Math.min(1000 * Math.pow(1.5, attemptNumber), 10000);
+            console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${attemptNumber + 1})`);
+            
+            setTimeout(() => {
+              attemptConnection(attemptNumber + 1);
+            }, retryDelay);
+          }
+        }, timeoutDuration);
+        
+        testSocket.addEventListener('open', () => {
+          console.log('WebSocket connection opened successfully on attempt #' + attemptNumber);
+          
+          // Clean up this connection
+          cleanupTestConnection(testSocket, connectionTimeout);
+          
+          connectionStatus.textContent = 'Connected to game server!';
+          connectionStatus.className = 'status success';
+          startButton.disabled = false;
+          window.connectionInProgress = false;
+          
+          // Send a ping to make sure the connection is working
+          testSocket.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
+          
+          // Close the test socket after a short delay
+          setTimeout(() => {
+            console.log('Closing test socket after successful connection');
+            if (testSocket.readyState !== WebSocket.CLOSED) {
+              testSocket.close();
+            }
+            window.testSocket = null;
+          }, 500);
+        });
+        
+        testSocket.addEventListener('error', (error) => {
+          console.error('WebSocket error on attempt #' + attemptNumber + ':', error);
+          
+          // Clean up this connection attempt
+          cleanupTestConnection(testSocket, connectionTimeout);
+          
+          connectionStatus.textContent = `Connection error on attempt #${attemptNumber}. Retrying...`;
+          connectionStatus.className = 'status error';
+          startButton.disabled = true;
+          
+          // Retry with exponential backoff
+          const retryDelay = Math.min(1000 * Math.pow(1.5, attemptNumber), 10000);
+          console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${attemptNumber + 1})`);
+          
+          setTimeout(() => {
+            attemptConnection(attemptNumber + 1);
+          }, retryDelay);
+        });
+        
+        testSocket.addEventListener('close', (event) => {
+          console.log('Test socket closed on attempt #' + attemptNumber + ':', event.code, event.reason);
+          
+          // Clean up this connection attempt if it wasn't already cleaned up
+          cleanupTestConnection(testSocket, connectionTimeout);
+          
+          // Only update UI if this is a failure close, not our intentional close
+          if (!connectionStatus.className.includes('success')) {
+            connectionStatus.textContent = `Connection closed on attempt #${attemptNumber}. Retrying...`;
+            connectionStatus.className = 'status error';
+            startButton.disabled = true;
+            
+            // Retry with exponential backoff
+            const retryDelay = Math.min(1000 * Math.pow(1.5, attemptNumber), 10000);
+            console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${attemptNumber + 1})`);
+            
+            setTimeout(() => {
+              attemptConnection(attemptNumber + 1);
+            }, retryDelay);
+          }
+        });
+        
+        testSocket.addEventListener('message', (event) => {
+          console.log('Received message from server on attempt #' + attemptNumber + ':', event.data);
+        });
+      } catch (error) {
+        console.error('Error creating WebSocket:', error);
+        
+        // Decrement active connections counter
+        if (window.activeConnections > 0) {
+          window.activeConnections--;
+        }
+        
+        connectionStatus.textContent = `Error creating connection on attempt #${attemptNumber}. Retrying...`;
         connectionStatus.className = 'status error';
         startButton.disabled = true;
         
-        // Try again in 2 seconds
-        setTimeout(testConnection, 2000);
-      }, 5000);
-      
-      testSocket.addEventListener('open', () => {
-        console.log('WebSocket connection opened successfully');
-        clearTimeout(connectionTimeout);
-        connectionStatus.textContent = 'Connected to game server!';
-        connectionStatus.className = 'status success';
-        startButton.disabled = false;
-        
-        // Send a ping to make sure the connection is working
-        testSocket.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
-        
-        // Close the test socket after a short delay
+        // Retry after a delay
         setTimeout(() => {
-          testSocket.close();
-        }, 500);
-      });
+          attemptConnection(attemptNumber + 1);
+        }, 2000);
+      }
+    }
+    
+    // Helper function to clean up test connection resources
+    function cleanupTestConnection(socket, timeout) {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       
-      testSocket.addEventListener('error', (error) => {
-        console.error('WebSocket error:', error);
-        clearTimeout(connectionTimeout);
-        connectionStatus.textContent = 'Could not connect to game server. The server might still be starting up. Please wait a moment and try again.';
-        connectionStatus.className = 'status error';
-        startButton.disabled = true;
-        
-        console.log('Connection error to', window.WEBSOCKET_URL);
-        
-        // Try again in 2 seconds
-        setTimeout(testConnection, 2000);
-      });
+      // Decrement active connections counter
+      if (window.activeConnections > 0) {
+        window.activeConnections--;
+        console.log(`Decremented active connections to ${window.activeConnections}`);
+      }
       
-      testSocket.addEventListener('message', (event) => {
-        console.log('Received message from server:', event.data);
-      });
+      // Close the socket if it's not already closed
+      if (socket && socket.readyState !== WebSocket.CLOSED) {
+        socket.close();
+      }
     }
     
     // Start button event listener
     startButton.addEventListener('click', function() {
       console.log('Start button clicked');
+      
+      // Close any existing test socket before starting the game
+      if (window.testSocket && window.testSocket.readyState !== WebSocket.CLOSED) {
+        console.log('Closing test socket before starting game');
+        window.testSocket.close();
+        window.testSocket = null;
+      }
+      
+      // Reset connection tracking
+      window.connectionInProgress = false;
       
       // Hide start screen and show game container
       document.getElementById('start-screen').style.display = 'none';
@@ -365,6 +513,30 @@
       document.body.appendChild(script);
     });
     
+    // Check if we're on a mobile browser
+    function isMobileBrowser() {
+      // Check for mobile user agents
+      const userAgentCheck = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      
+      // Check for touch capabilities
+      const hasTouchCapabilities = (
+        'ontouchstart' in window || 
+        navigator.maxTouchPoints > 0 || 
+        navigator.msMaxTouchPoints > 0
+      );
+      
+      // Consider a device mobile if it has a mobile user agent OR touch capabilities
+      const isMobile = userAgentCheck || hasTouchCapabilities;
+      
+      if (isMobile) {
+        console.log('Mobile/touch device detected');
+        if (hasTouchCapabilities) console.log('Touch capabilities detected');
+        if (userAgentCheck) console.log('Mobile user agent detected');
+      }
+      
+      return isMobile;
+    }
+    
     // Check if assets are accessible
     fetch('assets/ship.png')
       .then(response => {
@@ -372,6 +544,25 @@
           console.log('Assets are accessible');
           // Test connection after assets are verified
           testConnection();
+          
+          // For mobile devices or if auto_start is true, automatically click the start button after connection is established
+          if (isMobileBrowser() || autoStart) {
+            console.log('Mobile device or auto_start detected, will auto-start game');
+            
+            // Create a function to check if we can start the game
+            function tryAutoStart() {
+              if (!startButton.disabled && connectionStatus.className.includes('success')) {
+                console.log('Auto-starting game for mobile device or auto_start parameter');
+                startButton.click();
+              } else {
+                console.log('Waiting for connection before auto-starting...');
+                setTimeout(tryAutoStart, 500);
+              }
+            }
+            
+            // Start checking after a short delay
+            setTimeout(tryAutoStart, 1000);
+          }
         } else {
           console.error('Assets are not accessible');
           connectionStatus.style.display = 'block';
