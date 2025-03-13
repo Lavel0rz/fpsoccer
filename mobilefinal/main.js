@@ -462,7 +462,7 @@ class MainScene extends Phaser.Scene {
         this.sendInput();
         
         // Show visual feedback for projectile firing
-        this.showNotification("Firing projectile!", false);
+        // this.showNotification("Firing projectile!", false);
         
         // Reset boost flag after a short delay
         setTimeout(() => {
@@ -666,9 +666,6 @@ class MainScene extends Phaser.Scene {
           this.sendInput();
         }, 100);
         
-        // Show visual feedback
-        this.showNotification("Firing rocket!", false);
-        
         // Show aiming indicator with improved visualization
         this.rocketAimIndicator.clear();
         this.rocketAimIndicator.lineStyle(2, 0xff9900, 0.8);
@@ -700,8 +697,8 @@ class MainScene extends Phaser.Scene {
           this.rocketAimIndicator.setVisible(false);
         }, 300);
       } else {
-        // Show cooldown notification
-        this.showNotification("Rocket on cooldown!", true);
+        // Rocket on cooldown, but don't show notification
+        console.log("Rocket on cooldown");
       }
     });
     
@@ -2708,7 +2705,7 @@ class MainScene extends Phaser.Scene {
         this.sendInput();
         
         // Show visual feedback for projectile firing
-        this.showNotification("Firing projectile!", false);
+        // this.showNotification("Firing projectile!", false);
       } else if (!boostPressed && this.controllerBoostPressed) {
         this.controllerBoostPressed = false;
         this.inputState.boost = false;
