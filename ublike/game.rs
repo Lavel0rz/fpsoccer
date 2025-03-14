@@ -263,13 +263,8 @@ impl Game {
                         let dir_x = if dir_mag > 0.0 { self.ball.vx / dir_mag } else { 0.0 };
                         let dir_y = if dir_mag > 0.0 { self.ball.vy / dir_mag } else { 0.0 };
                         
-                        // Position the ball just outside the ship's radius to prevent immediate recapture
-                        let ship_radius = 20.0;
-                        let ball_radius = 10.0;
-                        let offset = ship_radius + ball_radius + 15.0; // Increased buffer for safety
-                        
-                        self.ball.x = ship_x + dir_x * offset;
-                        self.ball.y = ship_y + dir_y * offset;
+                        // Use the helper function to position the ball safely
+                        self.position_ball_after_shot(ship_x, ship_y, dir_x, dir_y);
 
                         // Set the last shooter and apply cooldown to prevent immediate grabbing
                         self.ball.last_shooter = Some(owner_id);
@@ -516,13 +511,8 @@ impl Game {
                         let dir_x = if dir_mag > 0.0 { self.ball.vx / dir_mag } else { 0.0 };
                         let dir_y = if dir_mag > 0.0 { self.ball.vy / dir_mag } else { 0.0 };
                         
-                        // Position the ball just outside the ship's radius to prevent immediate recapture
-                        let ship_radius = 20.0;
-                        let ball_radius = 10.0;
-                        let offset = ship_radius + ball_radius + 15.0; // Increased buffer for safety
-                        
-                        self.ball.x = ship_x + dir_x * offset;
-                        self.ball.y = ship_y + dir_y * offset;
+                        // Use the helper function to position the ball safely
+                        self.position_ball_after_shot(ship_x, ship_y, dir_x, dir_y);
 
                         // Set the last shooter and apply cooldown to prevent immediate grabbing
                         self.ball.last_shooter = Some(owner_id);
@@ -686,7 +676,7 @@ impl Game {
         }
 
         // Sub-Stepped Ball Physics
-        let sub_steps = 5;
+        let sub_steps = 10;
         
         // Increase sub-steps if ball is moving very fast to prevent tunneling
         let ball_speed = (self.ball.vx * self.ball.vx + self.ball.vy * self.ball.vy).sqrt();
@@ -1279,13 +1269,65 @@ impl Game {
             });
         }
     }
+
+    // Helper function to safely position the ball after shooting
+    fn position_ball_after_shot(&mut self, ship_x: f32, ship_y: f32, dir_x: f32, dir_y: f32) {
+        // Position the ball just outside the ship's radius to prevent immediate recapture
+        // But use a smaller offset to reduce the chance of tunneling through walls
+        let ship_radius = 20.0;
+        let ball_radius = 10.0;
+        let offset = ship_radius + ball_radius + 5.0; // Reduced from 15.0 to 5.0
+        
+        // Calculate new ball position
+        let new_ball_x = ship_x + dir_x * offset;
+        let new_ball_y = ship_y + dir_y * offset;
+        
+        // Check if the new position would put the ball inside a wall
+        let mut inside_wall = false;
+        for wall in crate::game::MAP_OBJECTS.iter().filter(|w| w.obj_type == "wall") {
+            let ball_left = new_ball_x - BALL_WIDTH / 2.0;
+            let ball_right = new_ball_x + BALL_WIDTH / 2.0;
+            let ball_top = new_ball_y - BALL_HEIGHT / 2.0;
+            let ball_bottom = new_ball_y + BALL_HEIGHT / 2.0;
+            
+            if ball_right > wall.x && ball_left < wall.x + wall.width &&
+               ball_bottom > wall.y && ball_top < wall.y + wall.height {
+                inside_wall = true;
+                println!("WARNING: Ball would be positioned inside a wall after shooting. Adjusting position.");
+                break;
+            }
+            
+            // Also check if the path from ship to new ball position intersects with a wall
+            if crate::collision::line_intersects_rect(
+                ship_x, ship_y,
+                new_ball_x, new_ball_y,
+                wall.x, wall.y, wall.width, wall.height
+            ) {
+                inside_wall = true;
+                println!("WARNING: Ball path would intersect a wall after shooting. Adjusting position.");
+                break;
+            }
+        }
+        
+        if inside_wall {
+            // If the new position would put the ball inside a wall, keep it at the ship's position
+            // and let the physics system handle the collision in the next update
+            self.ball.x = ship_x;
+            self.ball.y = ship_y;
+            println!("Ball positioned at ship center due to wall proximity");
+        } else {
+            // Otherwise, use the calculated position
+            self.ball.x = new_ball_x;
+            self.ball.y = new_ball_y;
+        }
+    }
 }
 
 pub static GLOBAL_GAME: Lazy<Arc<Mutex<Game>>> = Lazy::new(|| Arc::new(Mutex::new(Game::new())));
 
 pub async fn game_update_loop() {
     let fixed_dt = 0.1;
-    let sub_steps = 5;
+    let sub_steps = 10;
     let _sub_dt = fixed_dt / sub_steps as f32;
     let game_width = 2000.0;
     let game_height = 1200.0;

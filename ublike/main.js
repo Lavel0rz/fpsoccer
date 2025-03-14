@@ -1456,13 +1456,25 @@ class MainScene extends Phaser.Scene {
     const dt = delta / 1000;
     const shipSpeed = 120; // Increased from 100 to 120 (20% faster) to match server
     
+    // Initialize direction change flags for use throughout the method
+    let oppositeDirection = false;
+    let directionChanged = false;
+    let targetLength = 0;
+    
+    // Initialize smoothedDirection if it doesn't exist
+    if (!this.smoothedDirection) {
+      this.smoothedDirection = { x: 0, y: 0 };
+    }
+    
     // Only process input if player can move (not during countdown)
     if (this.playerCanMove !== false) {
+      // Store previous target direction for change detection
+      const prevTargetX = this.targetDirection.x;
+      const prevTargetY = this.targetDirection.y;
+      
       // Calculate target direction based on input
       this.targetDirection.x = 0;
       this.targetDirection.y = 0;
-      
-      let targetLength = 0;
       
       if (this.isMobile) {
         // Joystick input is now handled in updateJoystickInput method
@@ -1480,6 +1492,16 @@ class MainScene extends Phaser.Scene {
           this.targetDirection.x /= targetLength;
           this.targetDirection.y /= targetLength;
         }
+      }
+      
+      // Detect significant direction changes
+      if (targetLength > 0 && (prevTargetX !== 0 || prevTargetY !== 0)) {
+        // Calculate dot product to detect direction change
+        const dotProduct = this.targetDirection.x * prevTargetX + this.targetDirection.y * prevTargetY;
+        // If dot product is negative, directions are opposite (>90 degrees)
+        oppositeDirection = dotProduct < 0;
+        // If dot product is negative or small, direction changed significantly
+        directionChanged = dotProduct < 0.7;
       }
       
       // For desktop, we don't update the movement direction from keyboard input
@@ -1508,10 +1530,77 @@ class MainScene extends Phaser.Scene {
           this.movementDirection.y *= 0.95;
         }
       }
+    }
+    
+    // Apply easing to direction changes
+    // Use different easing factors based on whether direction changed significantly
+    // For opposite directions (180-degree turns), use an even smaller factor
+    const easingFactor = oppositeDirection ? 0.02 : (directionChanged ? 0.08 : 0.15);
+    
+    // For opposite direction changes, create a more natural arc-like transition
+    if (oppositeDirection && targetLength > 0) {
+      // For opposite directions, we'll use a simple lerp approach for maximum smoothness
+      // This creates a very natural, gradual turning motion
       
-      // Update predicted position based on movement direction
-      this.predictedState.x += this.targetDirection.x * shipSpeed * dt;
-      this.predictedState.y += this.targetDirection.y * shipSpeed * dt;
+      // Use a more aggressive lerp factor for opposite directions
+      const oppositeLerpFactor = 0.04; // Increased from 0.015 for more aggressive turning
+      
+      // Simple linear interpolation between current and target direction
+      this.smoothedDirection.x = Phaser.Math.Linear(
+        this.smoothedDirection.x, 
+        this.targetDirection.x, 
+        oppositeLerpFactor
+      );
+      this.smoothedDirection.y = Phaser.Math.Linear(
+        this.smoothedDirection.y, 
+        this.targetDirection.y, 
+        oppositeLerpFactor
+      );
+      
+      // Normalize the direction vector to maintain consistent speed
+      const smoothedLength = Math.sqrt(
+        this.smoothedDirection.x * this.smoothedDirection.x + 
+        this.smoothedDirection.y * this.smoothedDirection.y
+      );
+      
+      if (smoothedLength > 0.01) {
+        this.smoothedDirection.x /= smoothedLength;
+        this.smoothedDirection.y /= smoothedLength;
+      }
+    } else {
+      // For non-opposite directions, use normal linear interpolation with standard factor
+      this.smoothedDirection.x = Phaser.Math.Linear(
+        this.smoothedDirection.x, 
+        this.targetDirection.x, 
+        easingFactor
+      );
+      this.smoothedDirection.y = Phaser.Math.Linear(
+        this.smoothedDirection.y, 
+        this.targetDirection.y, 
+        easingFactor
+      );
+    }
+    
+    // Normalize smoothed direction if it's not zero
+    const smoothedLength = Math.sqrt(
+      this.smoothedDirection.x * this.smoothedDirection.x + 
+      this.smoothedDirection.y * this.smoothedDirection.y
+    );
+    
+    if (smoothedLength > 0) {
+      // Only normalize if length is significant to avoid division by very small numbers
+      if (smoothedLength > 0.01) {
+        this.smoothedDirection.x /= smoothedLength;
+        this.smoothedDirection.y /= smoothedLength;
+      }
+      
+      // Update predicted position based on smoothed direction
+      this.predictedState.x += this.smoothedDirection.x * shipSpeed * dt;
+      this.predictedState.y += this.smoothedDirection.y * shipSpeed * dt;
+    } else if (targetLength === 0) {
+      // If no input and smoothed direction is very small, just zero it out
+      this.smoothedDirection.x = 0;
+      this.smoothedDirection.y = 0;
     }
     
     // Server reconciliation - smoothly correct client prediction errors
@@ -1542,10 +1631,71 @@ class MainScene extends Phaser.Scene {
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
     
-    // Update ship rotation to match aim direction
-    if (this.movementDirection.x !== 0 || this.movementDirection.y !== 0) {
+    // Update ship rotation to match aim direction - use smoothed direction for desktop
+    if (!this.isMobile && (this.smoothedDirection.x !== 0 || this.smoothedDirection.y !== 0)) {
+      const angle = Math.atan2(this.smoothedDirection.y, this.smoothedDirection.x);
+      
+      // Use lerp for rotation as well for maximum smoothness
+      // Convert angles to vectors, lerp the vectors, then convert back to angle
+      // This avoids issues with angle wrapping and creates the smoothest possible rotation
+      
+      const currentRotationVector = {
+        x: Math.cos(this.ship.rotation),
+        y: Math.sin(this.ship.rotation)
+      };
+      
+      const targetRotationVector = {
+        x: Math.cos(angle),
+        y: Math.sin(angle)
+      };
+      
+      // Use a more aggressive lerp factor for rotation
+      const rotationLerpFactor = oppositeDirection ? 0.08 : 0.15;
+      
+      // Lerp the rotation vectors
+      const newRotationX = Phaser.Math.Linear(
+        currentRotationVector.x,
+        targetRotationVector.x,
+        rotationLerpFactor
+      );
+      
+      const newRotationY = Phaser.Math.Linear(
+        currentRotationVector.y,
+        targetRotationVector.y,
+        rotationLerpFactor
+      );
+      
+      // Convert back to angle
+      this.ship.rotation = Math.atan2(newRotationY, newRotationX);
+    } else if (this.movementDirection.x !== 0 || this.movementDirection.y !== 0) {
       const angle = Math.atan2(this.movementDirection.y, this.movementDirection.x);
-      this.ship.rotation = angle;
+      
+      // Use the same vector-based lerp for mobile rotation
+      const currentRotationVector = {
+        x: Math.cos(this.ship.rotation),
+        y: Math.sin(this.ship.rotation)
+      };
+      
+      const targetRotationVector = {
+        x: Math.cos(angle),
+        y: Math.sin(angle)
+      };
+      
+      const rotationLerpFactor = oppositeDirection ? 0.08 : 0.15;
+      
+      const newRotationX = Phaser.Math.Linear(
+        currentRotationVector.x,
+        targetRotationVector.x,
+        rotationLerpFactor
+      );
+      
+      const newRotationY = Phaser.Math.Linear(
+        currentRotationVector.y,
+        targetRotationVector.y,
+        rotationLerpFactor
+      );
+      
+      this.ship.rotation = Math.atan2(newRotationY, newRotationX);
     }
     
     // Update direction indicator if it exists

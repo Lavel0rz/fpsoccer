@@ -39,21 +39,45 @@ pub fn resolve_rect_collision(ball: &mut Ball, wall: &MapObject) {
     } else { 0.0 };
 
     if overlap_x > 0.0 && overlap_y > 0.0 {
-        if overlap_x < overlap_y {
-            if ball.x < wall.x {
-                ball.x -= overlap_x;
-            } else {
-                ball.x += overlap_x;
-            }
-            ball.vx = -ball.vx;
+        // Calculate ball speed for velocity dampening
+        let ball_speed = (ball.vx * ball.vx + ball.vy * ball.vy).sqrt();
+        
+        // Apply a velocity dampening factor based on speed
+        // Higher speeds get more dampening to prevent excessive bouncing
+        let dampening_factor = if ball_speed > 300.0 {
+            0.8 // More dampening for very fast balls
+        } else if ball_speed > 150.0 {
+            0.9 // Medium dampening for moderately fast balls
         } else {
-            if ball.y < wall.y {
-                ball.y -= overlap_y;
+            0.95 // Minimal dampening for slow balls
+        };
+        
+        // Add a small buffer to prevent the ball from getting stuck in walls
+        let buffer = 1.0;
+        
+        if overlap_x < overlap_y {
+            // Horizontal collision
+            if ball.x < wall.x {
+                ball.x = wall_left - BALL_WIDTH / 2.0 - buffer;
             } else {
-                ball.y += overlap_y;
+                ball.x = wall_right + BALL_WIDTH / 2.0 + buffer;
             }
-            ball.vy = -ball.vy;
+            // Reverse and dampen horizontal velocity
+            ball.vx = -ball.vx * dampening_factor;
+        } else {
+            // Vertical collision
+            if ball.y < wall.y {
+                ball.y = wall_top - BALL_HEIGHT / 2.0 - buffer;
+            } else {
+                ball.y = wall_bottom + BALL_HEIGHT / 2.0 + buffer;
+            }
+            // Reverse and dampen vertical velocity
+            ball.vy = -ball.vy * dampening_factor;
         }
+        
+        // Log collision for debugging
+        println!("Ball collided with wall at ({}, {}), new velocity: ({}, {})", 
+                 ball.x, ball.y, ball.vx, ball.vy);
     }
 }
 
