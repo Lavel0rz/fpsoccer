@@ -45,6 +45,10 @@ class MainScene extends Phaser.Scene {
     this.isConnecting = false; // Track if we're currently connecting
     this.connectionEstablished = false; // Track if we've successfully connected
     
+    // Manual rotation tracking for mobile
+    this.manualRotation = false;
+    this.manualRotationTime = 0;
+    
     // Input state
     this.inputState = {
       left: false,
@@ -84,7 +88,7 @@ class MainScene extends Phaser.Scene {
     
     // Movement direction
     this.targetDirection = { x: 0, y: 0 };
-    this.movementDirection = { x: 0, y: 0 };
+    this.movementDirection = { x: 1, y: 0 }; // Default direction (pointing east/right)
     this.turnSpeed = 0.2; // How quickly the ship turns towards the target direction
     
     // For aiming
@@ -309,12 +313,16 @@ class MainScene extends Phaser.Scene {
 
     this.ship = this.add.sprite(400, 300, 'ship').setScale(0.09);
     this.ship.setDepth(10);
+    this.ship.rotation = 0; // Explicitly set initial rotation (pointing east/right)
     
     // Add cannon sprite to the ship
     this.cannon = this.add.sprite(this.ship.x, this.ship.y, 'cannon');
-    this.cannon.setScale(0.25);  // Slightly smaller than the ship
+    this.cannon.setScale(0.25);  // Match the scale with other ships' cannons
     this.cannon.setDepth(11);    // Above the ship
     this.cannon.setOrigin(0.3, 0.5); // Position it at the front of the ship
+    
+    // Initialize cannon position
+    this.updateCannonPosition();
     
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.55).setOrigin(0.5);
     this.ball.setVisible(false);
@@ -929,24 +937,57 @@ class MainScene extends Phaser.Scene {
     
     // Use direct event listeners instead of Phaser's event system
     this.shootButton.on('pointerdown', (pointer) => {
-      console.log('Shoot button pressed');
-      // Stop event propagation to prevent firing rockets
+      console.log('Rocket button pressed');
+      // Stop event propagation to prevent other handlers
       pointer.event.stopPropagation();
       
-      this.inputState.shoot = true;
-      this.sendInput();
-      // Reset shoot flag after a short delay
-      setTimeout(() => {
-        this.inputState.shoot = false;
+      // Check if rocket is ready (if server state exists)
+      const rocketReady = !this.serverState.ship || this.serverState.ship.rocket_cooldown <= 0;
+      
+      if (rocketReady) {
+        // Set boost flag (fire rocket)
+        this.inputState.boost = true;
+        
+        // Get the direction the ship is facing
+        const angle = this.ship.rotation;
+        const dx = Math.cos(angle);
+        const dy = Math.sin(angle);
+        
+        // Set aim target in the direction the ship is facing
+        if (!this.aimTarget) {
+          this.aimTarget = { x: 0, y: 0 };
+        }
+        this.aimTarget.x = this.ship.x + dx * 200;
+        this.aimTarget.y = this.ship.y + dy * 200;
+        
+        // Update movement direction for rotation
+        this.movementDirection.x = dx;
+        this.movementDirection.y = dy;
+        
+        // Set a flag to indicate we've manually set the rotation
+        this.manualRotation = true;
+        this.manualRotationTime = Date.now();
+        
+        // Update cannon position and rotation immediately
+        this.updateCannonPosition();
+        
         this.sendInput();
-      }, 100);
+        
+        // Reset boost flag after a short delay
+        setTimeout(() => {
+          this.inputState.boost = false;
+          this.sendInput();
+        }, 100);
+      } else {
+        console.log("Rocket on cooldown");
+      }
     });
     
     // Add text to the shoot button
     const shootText = this.add.text(
       width - buttonPadding,
       height - buttonPadding,
-      'SHOOT',
+      'FIRE',
       { fontSize: Math.max(6, Math.min(10, width * 0.006)), color: '#ffffff' } // Smaller font
     ).setOrigin(0.5);
     shootText.setScrollFactor(0); // Keep fixed on screen
@@ -1002,82 +1043,97 @@ class MainScene extends Phaser.Scene {
         return;
       }
       
-      // For any other touch (right side or left side with active joystick), fire rocket
-      // Check if rocket is ready (if server state exists)
-      const rocketReady = !this.serverState.ship || this.serverState.ship.rocket_cooldown <= 0;
+      // For any other touch (right side or left side with active joystick), shoot the ball
+      console.log('Shooting ball at', pointer.x, pointer.y);
       
-      if (rocketReady) {
-        console.log('Firing rocket at', pointer.x, pointer.y);
-        
-        // Get the exact world coordinates where the user touched
-        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-        console.log('World point for aiming:', worldPoint.x, worldPoint.y);
-        
-        // Update the aimTarget object with the touch coordinates
-        if (!this.aimTarget) {
-          this.aimTarget = { x: 0, y: 0 };
-        }
-        this.aimTarget.x = worldPoint.x;
-        this.aimTarget.y = worldPoint.y;
-        
-        // Set boost flag
-        this.inputState.boost = true;
-        
-        // Log the ship position and target for debugging
-        if (this.ship) {
-          console.log('Ship position:', this.ship.x, this.ship.y);
-          console.log('Aiming from ship to:', worldPoint.x, worldPoint.y);
-          
-          // Calculate and log the direction vector
-          const dx = worldPoint.x - this.ship.x;
-          const dy = worldPoint.y - this.ship.y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          console.log('Direction vector:', dx/dist, dy/dist);
-        }
-        
-        // Send input to server immediately
-        this.sendInput();
-        
-        // Reset boost flag after a short delay
-        setTimeout(() => {
-          this.inputState.boost = false;
-          this.sendInput();
-        }, 100);
-        
-        // Show aiming indicator with improved visualization
-        this.rocketAimIndicator.clear();
-        this.rocketAimIndicator.lineStyle(2, 0xff9900, 0.8);
-        
-        // Get ship screen position
-        let shipScreenX, shipScreenY;
-        if (this.ship) {
-          const shipScreenPos = this.cameras.main.worldToScreenPoint(this.ship.x, this.ship.y);
-          shipScreenX = shipScreenPos.x;
-          shipScreenY = shipScreenPos.y;
-        } else {
-          // Fallback if ship isn't available
-          shipScreenX = width / 2;
-          shipScreenY = height / 2;
-        }
-        
-        // Draw a line from ship to touch point
-        this.rocketAimIndicator.beginPath();
-        this.rocketAimIndicator.moveTo(shipScreenX, shipScreenY);
-        this.rocketAimIndicator.lineTo(pointer.x, pointer.y);
-        this.rocketAimIndicator.strokePath();
-        
-        // Draw a circle at the touch point
-        this.rocketAimIndicator.strokeCircle(pointer.x, pointer.y, 10);
-        this.rocketAimIndicator.setVisible(true);
-        
-        // Hide the indicator after a short delay
-        setTimeout(() => {
-          this.rocketAimIndicator.setVisible(false);
-        }, 300);
-      } else {
-        // Rocket on cooldown, but don't show notification
-        console.log("Rocket on cooldown");
+      // Get the exact world coordinates where the user touched
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+      console.log('World point for aiming:', worldPoint.x, worldPoint.y);
+      
+      // Update the aimTarget object with the touch coordinates
+      if (!this.aimTarget) {
+        this.aimTarget = { x: 0, y: 0 };
       }
+      this.aimTarget.x = worldPoint.x;
+      this.aimTarget.y = worldPoint.y;
+      
+      // Calculate direction vector for rotation
+      const dx = worldPoint.x - this.ship.x;
+      const dy = worldPoint.y - this.ship.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist > 0) {
+        // Update movement direction for rotation
+        this.movementDirection.x = dx / dist;
+        this.movementDirection.y = dy / dist;
+        
+        // Directly set ship rotation to face the touch point
+        const angle = Math.atan2(dy, dx);
+        this.ship.rotation = angle;
+        console.log('Touch handler: Setting ship rotation to', angle);
+        
+        // Set a flag to indicate we've manually set the rotation
+        this.manualRotation = true;
+        this.manualRotationTime = Date.now();
+        
+        // Update cannon position and rotation immediately
+        this.updateCannonPosition();
+      }
+      
+      // Set shoot flag
+      this.inputState.shoot = true;
+      
+      // Log the ship position and target for debugging
+      if (this.ship) {
+        console.log('Ship position:', this.ship.x, this.ship.y);
+        console.log('Aiming from ship to:', worldPoint.x, worldPoint.y);
+        
+        // Calculate and log the direction vector
+        const dx = worldPoint.x - this.ship.x;
+        const dy = worldPoint.y - this.ship.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        console.log('Direction vector:', dx/dist, dy/dist);
+      }
+      
+      // Send input to server immediately
+      this.sendInput();
+      
+      // Reset shoot flag after a short delay
+      setTimeout(() => {
+        this.inputState.shoot = false;
+        this.sendInput();
+      }, 100);
+      
+      // Show aiming indicator with improved visualization
+      this.rocketAimIndicator.clear();
+      this.rocketAimIndicator.lineStyle(2, 0xff9900, 0.8);
+      
+      // Get ship screen position
+      let shipScreenX, shipScreenY;
+      if (this.ship) {
+        const shipScreenPos = this.cameras.main.worldToScreenPoint(this.ship.x, this.ship.y);
+        shipScreenX = shipScreenPos.x;
+        shipScreenY = shipScreenPos.y;
+      } else {
+        // Fallback if ship isn't available
+        shipScreenX = width / 2;
+        shipScreenY = height / 2;
+      }
+      
+      // Draw a line from ship to touch point
+      this.rocketAimIndicator.beginPath();
+      this.rocketAimIndicator.moveTo(shipScreenX, shipScreenY);
+      this.rocketAimIndicator.lineTo(pointer.x, pointer.y);
+      this.rocketAimIndicator.strokePath();
+      
+      // Draw a circle at the touch point
+      this.rocketAimIndicator.strokeCircle(pointer.x, pointer.y, 10);
+      this.rocketAimIndicator.setVisible(true);
+      
+      // Hide the indicator after a short delay
+      setTimeout(() => {
+        this.rocketAimIndicator.setVisible(false);
+      }, 300);
     });
     
     // Handle pointer move to update joystick position
@@ -1199,6 +1255,19 @@ class MainScene extends Phaser.Scene {
     // Update target direction for movement
     this.targetDirection.x = this.joystickForceX;
     this.targetDirection.y = this.joystickForceY;
+    
+    // Also update movement direction for consistent rotation
+    this.movementDirection.x = this.joystickForceX;
+    this.movementDirection.y = this.joystickForceY;
+    
+    // Update ship rotation to face the joystick direction
+    if (this.joystickForce > 0.1) {
+      const angle = Math.atan2(this.joystickForceY, this.joystickForceX);
+      this.ship.rotation = angle;
+      
+      // Update cannon position and rotation
+      this.updateCannonPosition();
+    }
     
     // Send input to server
     this.sendInput();
@@ -1703,6 +1772,52 @@ class MainScene extends Phaser.Scene {
       
       // Convert back to angle
       this.ship.rotation = Math.atan2(newRotationY, newRotationX);
+      
+      // Update cannon position after rotation
+      this.updateCannonPosition();
+    } else if (this.isMobile) {
+      // For mobile, only update rotation if we haven't manually set it recently
+      // or if we're using the joystick
+      const manualRotationTimeout = 500; // Keep manual rotation for 500ms
+      const useManualRotation = this.manualRotation && 
+                               (Date.now() - this.manualRotationTime < manualRotationTimeout);
+      
+      if (!useManualRotation && this.movementDirection.x !== 0 && this.movementDirection.y !== 0) {
+        const angle = Math.atan2(this.movementDirection.y, this.movementDirection.x);
+        
+        // Use the same vector-based lerp for mobile rotation
+        const currentRotationVector = {
+          x: Math.cos(this.ship.rotation),
+          y: Math.sin(this.ship.rotation)
+        };
+        
+        const targetRotationVector = {
+          x: Math.cos(angle),
+          y: Math.sin(angle)
+        };
+        
+        // Use a more aggressive lerp factor for rotation on mobile
+        const rotationLerpFactor = 0.2;
+        
+        // Lerp the rotation vectors
+        const newRotationX = Phaser.Math.Linear(
+          currentRotationVector.x,
+          targetRotationVector.x,
+          rotationLerpFactor
+        );
+        
+        const newRotationY = Phaser.Math.Linear(
+          currentRotationVector.y,
+          targetRotationVector.y,
+          rotationLerpFactor
+        );
+        
+        // Convert back to angle
+        this.ship.rotation = Math.atan2(newRotationY, newRotationX);
+        
+        // Update cannon position after rotation
+        this.updateCannonPosition();
+      }
     } else if (this.movementDirection.x !== 0 || this.movementDirection.y !== 0) {
       const angle = Math.atan2(this.movementDirection.y, this.movementDirection.x);
       
@@ -1735,22 +1850,13 @@ class MainScene extends Phaser.Scene {
       
       // Convert back to angle
       this.ship.rotation = Math.atan2(newRotationY, newRotationX);
+      
+      // Update cannon position after rotation
+      this.updateCannonPosition();
     }
     
     // Update cannon position and rotation to match the ship
-    if (this.cannon) {
-      const cannonDistance = 4; // Distance from ship center to cannon position
-      this.cannon.x = this.ship.x + Math.cos(this.ship.rotation) * cannonDistance;
-      this.cannon.y = this.ship.y + Math.sin(this.ship.rotation) * cannonDistance;
-      this.cannon.rotation = this.ship.rotation;
-      
-      // Make the cannon more visible when rocket is ready
-      if (this.serverState.ship && this.serverState.ship.rocket_cooldown === 0) {
-        this.cannon.setTint(0xffff00); // Yellow tint when ready
-      } else {
-        this.cannon.clearTint();
-      }
-    }
+    this.updateCannonPosition();
     
     // Update direction indicator if it exists
     if (this.directionIndicator) {
@@ -1813,6 +1919,9 @@ class MainScene extends Phaser.Scene {
     
     // Update camera position
     this.updateCamera();
+    
+    // Always update cannon position at the end of the update method
+    this.updateCannonPosition();
     
     // Send input to server
     this.sendInput();
@@ -3215,6 +3324,24 @@ class MainScene extends Phaser.Scene {
         console.error('Error processing message:', error);
       }
     });
+  }
+
+  // Helper method to update cannon position and rotation
+  updateCannonPosition() {
+    if (!this.cannon || !this.ship) return;
+    
+    // Always position the cannon in front of the ship based on its rotation
+    const cannonDistance = 4; // Distance from ship center to cannon position
+    this.cannon.x = this.ship.x + Math.cos(this.ship.rotation) * cannonDistance;
+    this.cannon.y = this.ship.y + Math.sin(this.ship.rotation) * cannonDistance;
+    this.cannon.rotation = this.ship.rotation;
+    
+    // Make the cannon more visible when rocket is ready
+    if (this.serverState.ship && this.serverState.ship.rocket_cooldown === 0) {
+      this.cannon.setTint(0xffff00); // Yellow tint when ready
+    } else {
+      this.cannon.clearTint();
+    }
   }
 }
   
