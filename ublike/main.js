@@ -222,6 +222,7 @@ class MainScene extends Phaser.Scene {
     this.load.image('ship_blue', 'assets/ship.png');
     this.load.image('ball', 'assets/ball.png');
     this.load.image('spark', 'assets/ship_blue.png');
+    this.load.image('cannon', 'assets/cannon.png'); // Add cannon sprite
     this.load.json('mapData', 'assets/map_data.json');
     this.load.image('wall', 'assets/wall.png');
     this.load.image('goal', 'assets/goal.png');
@@ -307,6 +308,14 @@ class MainScene extends Phaser.Scene {
     // this.createBackgroundGrid(extendedWidth, extendedHeight);
 
     this.ship = this.add.sprite(400, 300, 'ship').setScale(0.09);
+    this.ship.setDepth(10);
+    
+    // Add cannon sprite to the ship
+    this.cannon = this.add.sprite(this.ship.x, this.ship.y, 'cannon');
+    this.cannon.setScale(0.25);  // Slightly smaller than the ship
+    this.cannon.setDepth(11);    // Above the ship
+    this.cannon.setOrigin(0.3, 0.5); // Position it at the front of the ship
+    
     this.ball = this.add.sprite(400, 400, 'ball').setScale(0.55).setOrigin(0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
@@ -1317,6 +1326,21 @@ class MainScene extends Phaser.Scene {
           sprite.rotation = Phaser.Math.Angle.RotateTo(sprite.rotation, angle, rotationSpeed);
         }
         
+        // Update cannon position and rotation
+        if (sprite.cannon) {
+          const cannonDistance = 4; // Distance from ship center to cannon position
+          sprite.cannon.x = sprite.x + Math.cos(sprite.rotation) * cannonDistance;
+          sprite.cannon.y = sprite.y + Math.sin(sprite.rotation) * cannonDistance;
+          sprite.cannon.rotation = sprite.rotation;
+          
+          // Make the cannon more visible when rocket is ready
+          if (curr.rocket_cooldown === 0) {
+            sprite.cannon.setTint(0xffff00); // Yellow tint when ready
+          } else {
+            sprite.cannon.clearTint();
+          }
+        }
+        
         // Generate particles for remote ships - only if moving significantly
         const distanceMoved = Phaser.Math.Distance.Between(prev.x, prev.y, curr.x, curr.y);
         if (distanceMoved > 3) {
@@ -1376,8 +1400,14 @@ class MainScene extends Phaser.Scene {
         // If we're grabbing the ball, position it at our ship
         this.ball.x = this.predictedState.x;
         this.ball.y = this.predictedState.y;
-        this.ball.setDepth(1);
+        this.ball.setDepth(20); // Highest depth to render on top of everything
         this.ball.setVisible(true);
+        
+        // Make the ship with the ball render on top of other ships
+        this.ship.setDepth(14); // Higher than normal ships
+        if (this.cannon) {
+          this.cannon.setDepth(15); // Above the ship but below the ball
+        }
         return;
       } else {
         // If another player is grabbing the ball, position it at their ship
@@ -1385,8 +1415,14 @@ class MainScene extends Phaser.Scene {
         if (grabbingSprite) {
           this.ball.x = grabbingSprite.x;
           this.ball.y = grabbingSprite.y;
-          this.ball.setDepth(1);
+          this.ball.setDepth(20); // Highest depth to render on top of everything
           this.ball.setVisible(true);
+          
+          // Make the ship with the ball render on top of other ships
+          grabbingSprite.setDepth(14); // Higher than normal ships
+          if (grabbingSprite.cannon) {
+            grabbingSprite.cannon.setDepth(15); // Above the ship but below the ball
+          }
           return;
         }
       }
@@ -1681,8 +1717,10 @@ class MainScene extends Phaser.Scene {
         y: Math.sin(angle)
       };
       
-      const rotationLerpFactor = oppositeDirection ? 0.08 : 0.15;
+      // Use a more aggressive lerp factor for rotation on mobile
+      const rotationLerpFactor = 0.2;
       
+      // Lerp the rotation vectors
       const newRotationX = Phaser.Math.Linear(
         currentRotationVector.x,
         targetRotationVector.x,
@@ -1695,7 +1733,23 @@ class MainScene extends Phaser.Scene {
         rotationLerpFactor
       );
       
+      // Convert back to angle
       this.ship.rotation = Math.atan2(newRotationY, newRotationX);
+    }
+    
+    // Update cannon position and rotation to match the ship
+    if (this.cannon) {
+      const cannonDistance = 4; // Distance from ship center to cannon position
+      this.cannon.x = this.ship.x + Math.cos(this.ship.rotation) * cannonDistance;
+      this.cannon.y = this.ship.y + Math.sin(this.ship.rotation) * cannonDistance;
+      this.cannon.rotation = this.ship.rotation;
+      
+      // Make the cannon more visible when rocket is ready
+      if (this.serverState.ship && this.serverState.ship.rocket_cooldown === 0) {
+        this.cannon.setTint(0xffff00); // Yellow tint when ready
+      } else {
+        this.cannon.clearTint();
+      }
     }
     
     // Update direction indicator if it exists
@@ -3033,6 +3087,13 @@ class MainScene extends Phaser.Scene {
               sprite.team = shipState.team;
               sprite.currentTeam = shipState.team;
               
+              // Add cannon to other player's ship
+              const cannon = this.add.sprite(shipState.x, shipState.y, 'cannon')
+                .setScale(0.25)
+                .setOrigin(0.3, 0.5)
+                .setDepth(6);
+              sprite.cannon = cannon; // Attach cannon to ship sprite for easy reference
+              
               // Add player name text above ship
               const nameText = this.add.text(shipState.x, shipState.y - 30, 
                 shipState.display_name || `Player ${id}`, 
@@ -3098,6 +3159,11 @@ class MainScene extends Phaser.Scene {
                   this.otherShips[id].rocketReadyTween.stop();
                 }
                 this.otherShips[id].rocketReadyText.destroy();
+              }
+              
+              // Clean up the cannon sprite
+              if (this.otherShips[id].cannon) {
+                this.otherShips[id].cannon.destroy();
               }
               
               this.otherShips[id].destroy();
