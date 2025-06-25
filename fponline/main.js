@@ -415,6 +415,15 @@ class MainScene extends Phaser.Scene {
     
     this.teamText = this.add.text(10, 70, "Team: --", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
     
+    // Initialize team scores for 4-team support
+    this.team1Score = 0;
+    this.team2Score = 0;
+    this.team3Score = 0;
+    this.team4Score = 0;
+    
+    // Create initial score pie chart
+    this.createScorePieChart();
+    
     // Get player display name from window object or use default
     const playerName = window.PLAYER_DISPLAY_NAME || 'You';
     
@@ -452,8 +461,14 @@ class MainScene extends Phaser.Scene {
               this.scoreLabel, this.redScoreText, this.scoreSeparator, this.blueScoreText,
               this.teamText, 
               this.boostCircle, 
-              this.playerNameText
+              this.playerNameText,
+              this.scorePieChart, this.scorePieTitle
             ].filter(element => element !== undefined);
+            
+            // Also ignore score pie text elements if they exist
+            if (this.scorePieTexts) {
+              elementsToIgnore.push(...this.scorePieTexts.filter(element => element !== undefined));
+            }
             
             // Only call ignore if we have elements to ignore and minimap exists
             if (elementsToIgnore.length > 0 && this.minimap && typeof this.minimap.ignore === 'function') {
@@ -1949,23 +1964,20 @@ class MainScene extends Phaser.Scene {
   
   // Update the score display
   updateScoreDisplay() {
-    // Update the pie chart with current scores
-    this.createTeamPieMenu();
+    // Update scores from server state
+    if (this.serverState.team1_score !== undefined) this.team1Score = this.serverState.team1_score;
+    if (this.serverState.team2_score !== undefined) this.team2Score = this.serverState.team2_score;
+    if (this.serverState.team3_score !== undefined) this.team3Score = this.serverState.team3_score;
+    if (this.serverState.team4_score !== undefined) this.team4Score = this.serverState.team4_score;
     
-    // Legacy score display update for compatibility
-    if (this.serverState.team1_score !== undefined && this.serverState.team2_score !== undefined) {
-      // Update the individual score text objects
-      if (this.redScoreText) this.redScoreText.setText(this.serverState.team1_score.toString());
-      if (this.blueScoreText) this.blueScoreText.setText(this.serverState.team2_score.toString());
-      
-      // Reposition the elements to account for changing text widths
-      if (this.scoreSeparator && this.redScoreText) {
-        this.scoreSeparator.x = this.redScoreText.x + this.redScoreText.width;
-      }
-      if (this.blueScoreText && this.scoreSeparator) {
-        this.blueScoreText.x = this.scoreSeparator.x + this.scoreSeparator.width;
-      }
-    }
+    // Create/update the score pie chart at the top center
+    this.createScorePieChart();
+    
+    // Hide legacy score display
+    if (this.scoreLabel) this.scoreLabel.setVisible(false);
+    if (this.redScoreText) this.redScoreText.setVisible(false);
+    if (this.scoreSeparator) this.scoreSeparator.setVisible(false);
+    if (this.blueScoreText) this.blueScoreText.setVisible(false);
   }
   
   // Add method to update projectiles
@@ -3535,17 +3547,122 @@ class MainScene extends Phaser.Scene {
     });
   }
 
+  createScorePieChart() {
+    // Clean up existing score pie chart
+    if (this.scorePieChart) this.scorePieChart.destroy();
+    if (this.scorePieTexts) this.scorePieTexts.forEach(t => t.destroy());
+    if (this.scorePieTitle) this.scorePieTitle.destroy();
+    
+    // Create new score pie chart
+    this.scorePieChart = this.add.graphics();
+    this.scorePieTexts = [];
+    
+    // Position at top center of screen
+    const centerX = this.cameras.main.centerX;
+    const centerY = 80; // Top of screen
+    const radius = 50;
+    
+    // Team data with scores
+    const teams = [
+      { name: 'Red', color: 0xff0000, score: this.team1Score || 0 },
+      { name: 'Blue', color: 0x0078ff, score: this.team2Score || 0 },
+      { name: 'Yellow', color: 0xffdc00, score: this.team3Score || 0 },
+      { name: 'Green', color: 0x00c800, score: this.team4Score || 0 },
+    ];
+    
+    // Calculate total score for proportional slices
+    const totalScore = teams.reduce((sum, team) => sum + team.score, 0);
+    
+    // If no scores yet, show equal slices
+    if (totalScore === 0) {
+      const anglePer = (2 * Math.PI) / teams.length;
+      teams.forEach((team, i) => {
+        const startAngle = i * anglePer - Math.PI/2;
+        const endAngle = startAngle + anglePer;
+        
+        this.scorePieChart.beginPath();
+        this.scorePieChart.moveTo(centerX, centerY);
+        this.scorePieChart.arc(centerX, centerY, radius, startAngle, endAngle, false);
+        this.scorePieChart.closePath();
+        this.scorePieChart.fillStyle(team.color, 0.8);
+        this.scorePieChart.fillPath();
+        this.scorePieChart.lineStyle(2, 0xffffff, 1);
+        this.scorePieChart.strokePath();
+        
+        // Add team name and score
+        const midAngle = (startAngle + endAngle) / 2;
+        const textX = centerX + Math.cos(midAngle) * (radius * 0.7);
+        const textY = centerY + Math.sin(midAngle) * (radius * 0.7);
+        const text = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
+          font: 'bold 12px Arial',
+          fill: '#fff',
+          align: 'center',
+          stroke: '#000',
+          strokeThickness: 2
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+        this.scorePieTexts.push(text);
+      });
+    } else {
+      // Show proportional slices based on scores
+      let currentAngle = -Math.PI/2; // Start at top
+      teams.forEach((team) => {
+        const proportion = team.score / totalScore;
+        const sliceAngle = proportion * 2 * Math.PI;
+        const endAngle = currentAngle + sliceAngle;
+        
+        if (sliceAngle > 0) {
+          this.scorePieChart.beginPath();
+          this.scorePieChart.moveTo(centerX, centerY);
+          this.scorePieChart.arc(centerX, centerY, radius, currentAngle, endAngle, false);
+          this.scorePieChart.closePath();
+          this.scorePieChart.fillStyle(team.color, 0.8);
+          this.scorePieChart.fillPath();
+          this.scorePieChart.lineStyle(2, 0xffffff, 1);
+          this.scorePieChart.strokePath();
+          
+          // Add team name and score at the middle of the slice
+          const midAngle = (currentAngle + endAngle) / 2;
+          const textX = centerX + Math.cos(midAngle) * (radius * 0.7);
+          const textY = centerY + Math.sin(midAngle) * (radius * 0.7);
+          const text = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
+            font: 'bold 12px Arial',
+            fill: '#fff',
+            align: 'center',
+            stroke: '#000',
+            strokeThickness: 2
+          }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+          this.scorePieTexts.push(text);
+        }
+        
+        currentAngle = endAngle;
+      });
+    }
+    
+    // Add title
+    this.scorePieTitle = this.add.text(centerX, centerY - radius - 20, 'TEAM SCORES', {
+      font: 'bold 16px Arial',
+      fill: '#ffffff',
+      align: 'center',
+      stroke: '#000',
+      strokeThickness: 2
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+    
+    this.scorePieChart.setScrollFactor(0).setDepth(1000);
+  }
+
   createTeamPieMenu() {
     if (this.teamPieMenu) this.teamPieMenu.destroy();
-    if (this.teamPieTexts) this.teamPieTexts.forEach(t => t.destroy());
+    if (this.teamSwitchTexts) this.teamSwitchTexts.forEach(t => t.destroy());
+    if (this.teamPieHits) this.teamPieHits.forEach(h => h.destroy());
     this.teamPieMenu = this.add.graphics();
-    this.teamPieTexts = [];
+    this.teamSwitchTexts = [];
+    this.teamPieHits = [];
     const centerX = 120, centerY = 120, radius = 90;
     const teams = [
-      { name: 'Red', color: 0xff0000, score: this.team1Score, key: 'red' },
-      { name: 'Blue', color: 0x0078ff, score: this.team2Score, key: 'blue' },
-      { name: 'Yellow', color: 0xffdc00, score: this.team3Score, key: 'yellow' },
-      { name: 'Green', color: 0x00c800, score: this.team4Score, key: 'green' },
+      { name: 'Red', color: 0xff0000, score: this.team1Score || 0, key: 'red' },
+      { name: 'Blue', color: 0x0078ff, score: this.team2Score || 0, key: 'blue' },
+      { name: 'Yellow', color: 0xffdc00, score: this.team3Score || 0, key: 'yellow' },
+      { name: 'Green', color: 0x00c800, score: this.team4Score || 0, key: 'green' },
     ];
     const anglePer = (2 * Math.PI) / teams.length;
     teams.forEach((team, i) => {
@@ -3568,7 +3685,7 @@ class MainScene extends Phaser.Scene {
         stroke: '#000',
         strokeThickness: 3
       }).setOrigin(0.5).setDepth(1001);
-      this.teamPieTexts.push(t);
+      this.teamSwitchTexts.push(t);
       // Add interactive area for switching
       const hit = this.add.zone(centerX, centerY, radius*2, radius*2).setOrigin(0.5).setInteractive();
       hit.on('pointerdown', pointer => {
@@ -3584,7 +3701,6 @@ class MainScene extends Phaser.Scene {
         }
       });
       hit.setDepth(1000);
-      if (!this.teamPieHits) this.teamPieHits = [];
       this.teamPieHits.push(hit);
     });
     this.teamPieMenu.setDepth(999);
