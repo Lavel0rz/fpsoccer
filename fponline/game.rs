@@ -88,6 +88,8 @@ pub struct GameStateSnapshot {
     projectiles: Vec<Projectile>, // Add projectiles to the game state
     team1_score: u32, // Red team score
     team2_score: u32, // Blue team score
+    team3_score: u32, // Yellow team score
+    team4_score: u32, // Green team score
 }
 
 pub struct Game {
@@ -97,6 +99,8 @@ pub struct Game {
     pub next_id: u32,
     pub team1_score: u32, // Red team score
     pub team2_score: u32, // Blue team score
+    pub team3_score: u32, // Yellow team score  
+    pub team4_score: u32, // Green team score
     pub goal_cooldown: f32, // Add cooldown after a goal is scored
     pub red_team_count: u32, // Count of players in red team
     pub blue_team_count: u32, // Count of players in blue team
@@ -132,6 +136,8 @@ impl Game {
             next_id: 1,
             team1_score: 0,
             team2_score: 0,
+            team3_score: 0,
+            team4_score: 0,
             goal_cooldown: 0.0,
             red_team_count: 0,
             blue_team_count: 0,
@@ -144,6 +150,9 @@ impl Game {
     
     // Add a method to determine which team a new player should join
     pub fn assign_team(&mut self) -> Team {
+        // For corner defense mode: limit to 1 player per team
+        let max_players_per_team = 1;
+        
         let team_counts = [
             (Team::Red, self.red_team_count),
             (Team::Blue, self.blue_team_count),
@@ -151,8 +160,19 @@ impl Game {
             (Team::Green, self.green_team_count),
         ];
         
-        // Find team with lowest count
-        let (team, _) = team_counts.iter()
+        // Find team with lowest count that hasn't reached the limit
+        let available_teams: Vec<_> = team_counts.iter()
+            .filter(|(_, count)| *count < max_players_per_team)
+            .collect();
+        
+        if available_teams.is_empty() {
+            // All teams are full, assign to Red as fallback (should not happen in corner defense)
+            println!("Warning: All teams are full, assigning to Red team");
+            return Team::Red;
+        }
+        
+        // Find team with lowest count among available teams
+        let (team, _) = available_teams.iter()
             .min_by_key(|(_, count)| *count)
             .map(|(team, _)| (*team, 0u32))
             .unwrap_or((Team::Red, 0u32));
@@ -166,6 +186,59 @@ impl Game {
         }
         
         team
+    }
+    
+    // Add method to check if a team can accept new players
+    pub fn can_join_team(&self, team: Team) -> bool {
+        let max_players_per_team = 1; // For corner defense mode
+        
+        let current_count = match team {
+            Team::Red => self.red_team_count,
+            Team::Blue => self.blue_team_count,
+            Team::Yellow => self.yellow_team_count,
+            Team::Green => self.green_team_count,
+        };
+        
+        let can_join = current_count < max_players_per_team;
+        
+        println!("can_join_team check: {:?} team has {} players (max: {}), can join: {}", 
+                 team, current_count, max_players_per_team, can_join);
+        
+        // Also count actual players in this team for verification
+        let actual_count = self.players.values()
+            .filter(|player| player.team == team)
+            .count();
+        
+        println!("Verification: {:?} team actually has {} players in game", team, actual_count);
+        
+        if current_count as usize != actual_count {
+            println!("WARNING: Team count mismatch! Stored count: {}, Actual count: {}", 
+                     current_count, actual_count);
+        }
+        
+        can_join
+    }
+    
+    // Add method to recalculate team counts from actual players (to fix any sync issues)
+    pub fn recalculate_team_counts(&mut self) {
+        // Reset all counts
+        self.red_team_count = 0;
+        self.blue_team_count = 0;
+        self.yellow_team_count = 0;
+        self.green_team_count = 0;
+        
+        // Count players by team
+        for (_, player) in &self.players {
+            match player.team {
+                Team::Red => self.red_team_count += 1,
+                Team::Blue => self.blue_team_count += 1,
+                Team::Yellow => self.yellow_team_count += 1,
+                Team::Green => self.green_team_count += 1,
+            }
+        }
+        
+        println!("Recalculated team counts - Red: {}, Blue: {}, Yellow: {}, Green: {}", 
+                 self.red_team_count, self.blue_team_count, self.yellow_team_count, self.green_team_count);
     }
     
     // Update player removal to account for team counts
@@ -930,6 +1003,8 @@ impl Game {
             projectiles: self.projectiles.clone(),
             team1_score: self.team1_score,
             team2_score: self.team2_score,
+            team3_score: self.team3_score,
+            team4_score: self.team4_score,
         });
         let snapshot_str = snapshot.to_string();
         for (_id, sender) in self.clients.iter_mut() {
@@ -995,20 +1070,10 @@ impl Game {
                     
                     // Update scores based on which team scored
                     match scoring_team {
-                        Team::Red | Team::Blue => {
-                            if scoring_team == Team::Red {
-                                self.team1_score += 1;
-                            } else {
-                                self.team2_score += 1;
-                            }
-                        },
-                        Team::Yellow | Team::Green => {
-                            if scoring_team == Team::Yellow {
-                                self.team1_score += 1;
-                            } else {
-                                self.team2_score += 1;
-                            }
-                        }
+                        Team::Red => self.team1_score += 1,
+                        Team::Blue => self.team2_score += 1,
+                        Team::Yellow => self.team3_score += 1,
+                        Team::Green => self.team4_score += 1,
                     }
                     
                     // Reset ball position and state
@@ -1027,7 +1092,9 @@ impl Game {
                         "scoring_team": format!("{:?}", scoring_team),
                         "scored_on_team": format!("{:?}", scored_on_team),
                         "team1_score": self.team1_score,
-                        "team2_score": self.team2_score
+                        "team2_score": self.team2_score,
+                        "team3_score": self.team3_score,
+                        "team4_score": self.team4_score
                     });
                     
                     let goal_str = goal_event.to_string();
@@ -1066,6 +1133,8 @@ impl Game {
             projectiles: self.projectiles.clone(),
             team1_score: self.team1_score,
             team2_score: self.team2_score,
+            team3_score: self.team3_score,
+            team4_score: self.team4_score,
         }
     }
     
@@ -1074,6 +1143,8 @@ impl Game {
         // Reset scores
         self.team1_score = 0;
         self.team2_score = 0;
+        self.team3_score = 0;
+        self.team4_score = 0;
         
         // Find the min and max coordinates of all goals to determine the middle point
         // This reuses the same logic as in check_goal_collision
@@ -1145,7 +1216,9 @@ impl Game {
         let reset_event = serde_json::json!({
             "type": "game_reset",
             "team1_score": self.team1_score,
-            "team2_score": self.team2_score
+            "team2_score": self.team2_score,
+            "team3_score": self.team3_score,
+            "team4_score": self.team4_score
         });
         
         let reset_str = reset_event.to_string();

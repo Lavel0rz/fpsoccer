@@ -726,6 +726,10 @@ class MainScene extends Phaser.Scene {
                   this.ship.setTint(0xff0000);
                 } else if (this.playerTeam === 'blue') {
                   this.ship.setTint(0x0000ff);
+                } else if (this.playerTeam === 'yellow') {
+                  this.ship.setTint(0xffdc00);
+                } else if (this.playerTeam === 'green') {
+                  this.ship.setTint(0x00c800);
                 }
                 
                 // Show/hide reset button based on host status
@@ -744,6 +748,8 @@ class MainScene extends Phaser.Scene {
               if (msg.type === "goal") {
                 this.team1Score = msg.team1_score;
                 this.team2Score = msg.team2_score;
+                this.team3Score = msg.team3_score || 0;
+                this.team4Score = msg.team4_score || 0;
                 this.updateScoreDisplay();
                 
                 // Show goal animation with team color
@@ -1943,14 +1949,22 @@ class MainScene extends Phaser.Scene {
   
   // Update the score display
   updateScoreDisplay() {
+    // Update the pie chart with current scores
+    this.createTeamPieMenu();
+    
+    // Legacy score display update for compatibility
     if (this.serverState.team1_score !== undefined && this.serverState.team2_score !== undefined) {
       // Update the individual score text objects
-      this.redScoreText.setText(this.serverState.team1_score.toString());
-      this.blueScoreText.setText(this.serverState.team2_score.toString());
+      if (this.redScoreText) this.redScoreText.setText(this.serverState.team1_score.toString());
+      if (this.blueScoreText) this.blueScoreText.setText(this.serverState.team2_score.toString());
       
       // Reposition the elements to account for changing text widths
-      this.scoreSeparator.x = this.redScoreText.x + this.redScoreText.width;
-      this.blueScoreText.x = this.scoreSeparator.x + this.scoreSeparator.width;
+      if (this.scoreSeparator && this.redScoreText) {
+        this.scoreSeparator.x = this.redScoreText.x + this.redScoreText.width;
+      }
+      if (this.blueScoreText && this.scoreSeparator) {
+        this.blueScoreText.x = this.scoreSeparator.x + this.scoreSeparator.width;
+      }
     }
   }
   
@@ -2156,14 +2170,25 @@ class MainScene extends Phaser.Scene {
     if (team) {
       // Normalize team name format (could be 'Red'/'Blue' or 'red'/'blue')
       const normalizedTeam = typeof team === 'string' ? team.toLowerCase() : team;
-      const displayTeam = typeof team === 'string' ? team : (normalizedTeam === 'red' ? 'Red' : 'Blue');
+      let displayTeam = typeof team === 'string' ? team : normalizedTeam;
+      
+      // Ensure proper capitalization
+      if (normalizedTeam === 'red') displayTeam = 'Red';
+      else if (normalizedTeam === 'blue') displayTeam = 'Blue'; 
+      else if (normalizedTeam === 'yellow') displayTeam = 'Yellow';
+      else if (normalizedTeam === 'green') displayTeam = 'Green';
       
       console.log(`Updating team display to: ${displayTeam} (normalized: ${normalizedTeam})`);
       
       this.teamText.setText(`Team: ${displayTeam}`);
       
       // Set color based on team
-      const teamColor = normalizedTeam === 'red' ? '#ff0000' : '#0000ff';
+      let teamColor = '#ffffff';
+      if (normalizedTeam === 'red') teamColor = '#ff0000';
+      else if (normalizedTeam === 'blue') teamColor = '#0000ff';
+      else if (normalizedTeam === 'yellow') teamColor = '#ffdc00';
+      else if (normalizedTeam === 'green') teamColor = '#00c800';
+      
       this.teamText.setStyle({ font: "16px Arial", fill: teamColor });
       
       // Store the current team
@@ -2499,6 +2524,8 @@ class MainScene extends Phaser.Scene {
     // Update scores
     this.team1Score = message.team1_score;
     this.team2Score = message.team2_score;
+    this.team3Score = message.team3_score || 0;
+    this.team4Score = message.team4_score || 0;
     this.updateScoreDisplay();
     
     // Reset ball state to ensure it's visible and not grabbed
@@ -3100,6 +3127,8 @@ class MainScene extends Phaser.Scene {
         if (msg.type === "goal") {
           this.team1Score = msg.team1_score;
           this.team2Score = msg.team2_score;
+          this.team3Score = msg.team3_score || 0;
+          this.team4Score = msg.team4_score || 0;
           this.updateScoreDisplay();
           
           // Show goal animation with team color
@@ -3135,6 +3164,10 @@ class MainScene extends Phaser.Scene {
                 this.ship.setTint(0xff0000); // Red tint
               } else if (msg.players[this.clientId].team === 'Blue') {
                 this.ship.setTint(0x0000ff); // Blue tint
+              } else if (msg.players[this.clientId].team === 'Yellow') {
+                this.ship.setTint(0xffdc00); // Yellow tint
+              } else if (msg.players[this.clientId].team === 'Green') {
+                this.ship.setTint(0x00c800); // Green tint
               }
               
               // Update team display
@@ -3163,6 +3196,10 @@ class MainScene extends Phaser.Scene {
                 sprite.setTint(0xff0000); // Red tint
               } else if (shipState.team === 'Blue') {
                 sprite.setTint(0x0000ff); // Blue tint
+              } else if (shipState.team === 'Yellow') {
+                sprite.setTint(0xffdc00); // Yellow tint
+              } else if (shipState.team === 'Green') {
+                sprite.setTint(0x00c800); // Green tint
               }
               
               // Store the current team for change detection
@@ -3209,6 +3246,10 @@ class MainScene extends Phaser.Scene {
                   sprite.setTint(0xff0000); // Red tint
                 } else if (shipState.team === 'Blue') {
                   sprite.setTint(0x0000ff); // Blue tint
+                } else if (shipState.team === 'Yellow') {
+                  sprite.setTint(0xffdc00); // Yellow tint
+                } else if (shipState.team === 'Green') {
+                  sprite.setTint(0x00c800); // Green tint
                 }
               }
               
