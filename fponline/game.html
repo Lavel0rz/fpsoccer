@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Multiplayer Game</title>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3/dist/phaser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/phaser3-rex-plugins@1.1.79/dist/rexvirtualjoystickplugin.min.js"></script>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #121212;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+    }
+    
+    #game-container {
+      width: 100%;
+      height: 100%;
+      max-width: 100vw;
+      max-height: 100vh;
+      display: none; /* Hide initially */
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+    }
+    
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    
+    #back-to-lobby {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background-color: #4caf50;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9em;
+      z-index: 1000;
+    }
+    
+    #back-to-lobby:hover {
+      background-color: #3e8e41;
+    }
+    
+    #team-buttons {
+      position: fixed;
+      top: 50px;
+      left: 10px;
+      z-index: 9999; /* Ensure it's above everything */
+      display: none;
+      background-color: rgba(0, 0, 0, 0.7);
+      padding: 10px;
+      border-radius: 5px;
+      border: 1px solid #555;
+    }
+    
+    .team-button {
+      display: block;
+      width: 120px;
+      margin-bottom: 5px;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9em;
+      text-align: center;
+      font-weight: bold;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+    }
+    
+    .team-button:hover {
+      transform: scale(1.05);
+      transition: transform 0.2s;
+    }
+    
+    #join-red-team {
+      background-color: #ff4444;
+    }
+    
+    #join-red-team:hover {
+      background-color: #ff6666;
+    }
+    
+    #join-blue-team {
+      background-color: #4444ff;
+    }
+    
+    #join-blue-team:hover {
+      background-color: #6666ff;
+    }
+    
+    #start-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      text-align: center;
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    
+    #start-button {
+      background-color: #4caf50;
+      color: white;
+      border: none;
+      padding: 15px 30px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 1.2em;
+      margin-top: 20px;
+      transition: background-color 0.3s;
+    }
+    
+    #start-button:hover {
+      background-color: #3e8e41;
+    }
+    
+    .game-info {
+      margin-bottom: 20px;
+      font-size: 1.2em;
+    }
+    
+    #connection-status {
+      margin-top: 20px;
+      padding: 10px;
+      border-radius: 4px;
+      background-color: #333;
+      display: none;
+    }
+    
+    .error {
+      background-color: #ff5252 !important;
+      color: white;
+    }
+    
+    .success {
+      background-color: #4caf50 !important;
+      color: white;
+    }
+    
+    .loading {
+      background-color: #2196F3 !important;
+      color: white;
+    }
+    
+    /* Media queries for responsive design */
+    @media (max-width: 768px) {
+      #team-buttons {
+        top: auto;
+        bottom: 10px;
+        left: 10px;
+      }
+      
+      .team-button {
+        width: 40px; /* Reduced from 100px to 1/3 size */
+        height: 40px; /* Added height to make it square */
+        padding: 4px 6px; /* Smaller padding */
+        font-size: 0.6em; /* Smaller font */
+        border-radius: 50%; /* Make buttons circular */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 8px;
+      }
+      
+      /* Hide text on mobile and just show colored buttons */
+      #join-red-team::after {
+        content: "R";
+      }
+      
+      #join-blue-team::after {
+        content: "B";
+      }
+      
+      #reset-game::after {
+        content: "↻";
+        font-size: 1.2em;
+      }
+      
+      #join-red-team, #join-blue-team, #reset-game {
+        text-indent: -9999px;
+        line-height: 0;
+      }
+      
+      #back-to-lobby {
+        padding: 6px 10px;
+        font-size: 0.8em;
+      }
+    }
+  </style>
+</head>
+<body>
+  <button id="back-to-lobby" onclick="window.location.href='lobby.html'">Back to Lobby</button>
+  
+  <div id="team-buttons">
+    <button id="join-red-team" class="team-button">Join Red Team</button>
+    <button id="join-blue-team" class="team-button">Join Blue Team</button>
+    <button id="reset-game" class="team-button" style="background-color: #ff9800; display: none;">Reset Game</button>
+  </div>
+  
+  <div id="start-screen">
+    <h1>Ready to Play</h1>
+    <div id="game-info" class="game-info"></div>
+    <button id="start-button">Join Lobby</button>
+    <div id="connection-status"></div>
+  </div>
+  
+  <div id="game-container"></div>
+  
+  <script>
+    // Add debug logging to help troubleshoot
+    console.log('Game page loaded');
+    console.log('URL parameters:', window.location.search);
+    
+    // Initialize global connection tracking
+    window.activeConnections = 0;
+    window.gameSocket = null;
+    window.testSocket = null;
+    window.connectionInProgress = false;
+    
+    // Initialize team buttons
+    window.addEventListener('load', function() {
+      console.log('Page fully loaded, initializing team buttons');
+      const redButton = document.getElementById('join-red-team');
+      const blueButton = document.getElementById('join-blue-team');
+      
+      if (redButton && blueButton) {
+        console.log('Team buttons found in DOM');
+      } else {
+        console.error('Team buttons not found in DOM!');
+      }
+    });
+    
+    // Check if we're on itch.io or another hosting platform
+    function isOnItchIo() {
+      return window.location.hostname.includes('itch.io') || 
+             window.location.hostname.includes('itchio') ||
+             window.location.hostname.includes('hwcdn.net');
+    }
+    
+    // Parse URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    const gameId = urlParams.get('game_id');
+    const port = urlParams.get('port') || '8080';
+    const displayName = urlParams.get('display_name') || localStorage.getItem('playerDisplayName') || 'Player';
+    const autoStart = urlParams.get('auto_start') === 'true';
+    
+    // Store the display name in localStorage for future use
+    localStorage.setItem('playerDisplayName', displayName);
+    
+    console.log('Game ID:', gameId);
+    console.log('Port:', port);
+    console.log('Display Name:', displayName);
+    console.log('Auto Start:', autoStart);
+    
+    // Make the display name available to the game
+    window.PLAYER_DISPLAY_NAME = displayName;
+    
+    // If we're on itch.io and there's no game ID, redirect to lobby
+    if (isOnItchIo() && !gameId) {
+      console.log('No game ID provided on itch.io, redirecting to lobby...');
+      window.location.href = 'lobby.html';
+    }
+    
+    // Set the WebSocket URL - use game-specific path
+    window.WEBSOCKET_URL = gameId 
+        ? `wss://towerup.io/game/${gameId}/ws` 
+        : `wss://towerup.io/ws`;
+    console.log('WebSocket URL:', window.WEBSOCKET_URL);
+    
+    // Update game info display
+    const gameInfo = document.getElementById('game-info');
+    const connectionStatus = document.getElementById('connection-status');
+    const startButton = document.getElementById('start-button');
+    const gameContainer = document.getElementById('game-container');
+    
+    if (gameId) {
+      gameInfo.textContent = `Game ID: ${gameId} | Port: ${port}`;
+      console.log(`Joining specific game with ID: ${gameId}`);
+    } else {
+      gameInfo.textContent = 'Quick Play Mode';
+      console.log('Quick Play Mode - using default game instance');
+    }
+    
+    // Test connection to the game server
+    function testConnection() {
+      // Prevent multiple simultaneous connection attempts
+      if (window.connectionInProgress) {
+        console.log('Connection test already in progress, skipping');
+        return;
+      }
+      
+      window.connectionInProgress = true;
+      connectionStatus.style.display = 'block';
+      connectionStatus.textContent = 'Testing connection to game server...';
+      connectionStatus.className = 'status loading';
+      
+      console.log('Attempting to connect to:', window.WEBSOCKET_URL);
+      
+      // Close any existing test socket
+      if (window.testSocket && window.testSocket.readyState !== WebSocket.CLOSED) {
+        console.log('Closing existing test socket');
+        window.testSocket.close();
+        window.testSocket = null;
+      }
+      
+      // Add a delay before the first connection attempt to give the server time to start
+      const initialDelay = isMobileBrowser() ? 3000 : 2000; // Longer delay for mobile
+      console.log(`Waiting ${initialDelay/1000} seconds before first connection attempt...`);
+      
+      setTimeout(() => {
+        attemptConnection(1); // Start with attempt #1
+      }, initialDelay);
+    }
+    
+    // Attempt connection with exponential backoff
+    function attemptConnection(attemptNumber) {
+      // Limit the number of attempts
+      if (attemptNumber > 5) {
+        console.log('Maximum connection attempts reached');
+        connectionStatus.textContent = 'Could not connect after multiple attempts. Please refresh the page.';
+        connectionStatus.className = 'status error';
+        startButton.disabled = true;
+        window.connectionInProgress = false;
+        return;
+      }
+      
+      console.log(`Connection attempt #${attemptNumber} (Active connections: ${window.activeConnections})`);
+      connectionStatus.textContent = `Connection attempt #${attemptNumber}...`;
+      
+      try {
+        // Increment active connections counter
+        window.activeConnections++;
+        console.log(`Incremented active connections to ${window.activeConnections}`);
+        
+        const testSocket = new WebSocket(window.WEBSOCKET_URL);
+        window.testSocket = testSocket; // Store reference for cleanup
+        
+        // Increase timeout for later attempts
+        const timeoutDuration = Math.min(5000 + (attemptNumber * 1000), 15000);
+        
+        let connectionTimeout = setTimeout(() => {
+          if (testSocket.readyState !== WebSocket.OPEN) {
+            console.log(`Connection timeout after ${timeoutDuration/1000} seconds, closing socket`);
+            
+            // Clean up this connection attempt
+            cleanupTestConnection(testSocket, connectionTimeout);
+            
+            connectionStatus.textContent = `Connection attempt #${attemptNumber} timed out. Retrying...`;
+            connectionStatus.className = 'status error';
+            startButton.disabled = true;
+            
+            // Exponential backoff for retry
+            const retryDelay = Math.min(1000 * Math.pow(1.5, attemptNumber), 10000);
+            console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${attemptNumber + 1})`);
+            
+            setTimeout(() => {
+              attemptConnection(attemptNumber + 1);
+            }, retryDelay);
+          }
+        }, timeoutDuration);
+        
+        testSocket.addEventListener('open', () => {
+          console.log('WebSocket connection opened successfully on attempt #' + attemptNumber);
+          
+          // Clean up this connection
+          cleanupTestConnection(testSocket, connectionTimeout);
+          
+          connectionStatus.textContent = 'Connected to game server!';
+          connectionStatus.className = 'status success';
+          startButton.disabled = false;
+          window.connectionInProgress = false;
+          
+          // Send a ping to make sure the connection is working
+          testSocket.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
+          
+          // Close the test socket after a short delay
+          setTimeout(() => {
+            console.log('Closing test socket after successful connection');
+            if (testSocket.readyState !== WebSocket.CLOSED) {
+              testSocket.close();
+            }
+            window.testSocket = null;
+          }, 500);
+        });
+        
+        testSocket.addEventListener('error', (error) => {
+          console.error('WebSocket error on attempt #' + attemptNumber + ':', error);
+          
+          // Clean up this connection attempt
+          cleanupTestConnection(testSocket, connectionTimeout);
+          
+          connectionStatus.textContent = `Connection error on attempt #${attemptNumber}. Retrying...`;
+          connectionStatus.className = 'status error';
+          startButton.disabled = true;
+          
+          // Retry with exponential backoff
+          const retryDelay = Math.min(1000 * Math.pow(1.5, attemptNumber), 10000);
+          console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${attemptNumber + 1})`);
+          
+          setTimeout(() => {
+            attemptConnection(attemptNumber + 1);
+          }, retryDelay);
+        });
+        
+        testSocket.addEventListener('close', (event) => {
+          console.log('Test socket closed on attempt #' + attemptNumber + ':', event.code, event.reason);
+          
+          // Clean up this connection attempt if it wasn't already cleaned up
+          cleanupTestConnection(testSocket, connectionTimeout);
+          
+          // Only update UI if this is a failure close, not our intentional close
+          if (!connectionStatus.className.includes('success')) {
+            connectionStatus.textContent = `Connection closed on attempt #${attemptNumber}. Retrying...`;
+            connectionStatus.className = 'status error';
+            startButton.disabled = true;
+            
+            // Retry with exponential backoff
+            const retryDelay = Math.min(1000 * Math.pow(1.5, attemptNumber), 10000);
+            console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${attemptNumber + 1})`);
+            
+            setTimeout(() => {
+              attemptConnection(attemptNumber + 1);
+            }, retryDelay);
+          }
+        });
+        
+        testSocket.addEventListener('message', (event) => {
+          console.log('Received message from server on attempt #' + attemptNumber + ':', event.data);
+        });
+      } catch (error) {
+        console.error('Error creating WebSocket:', error);
+        
+        // Decrement active connections counter
+        if (window.activeConnections > 0) {
+          window.activeConnections--;
+        }
+        
+        connectionStatus.textContent = `Error creating connection on attempt #${attemptNumber}. Retrying...`;
+        connectionStatus.className = 'status error';
+        startButton.disabled = true;
+        
+        // Retry after a delay
+        setTimeout(() => {
+          attemptConnection(attemptNumber + 1);
+        }, 2000);
+      }
+    }
+    
+    // Helper function to clean up test connection resources
+    function cleanupTestConnection(socket, timeout) {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      
+      // Decrement active connections counter
+      if (window.activeConnections > 0) {
+        window.activeConnections--;
+        console.log(`Decremented active connections to ${window.activeConnections}`);
+      }
+      
+      // Close the socket if it's not already closed
+      if (socket && socket.readyState !== WebSocket.CLOSED) {
+        socket.close();
+      }
+    }
+    
+    // Start button event listener
+    startButton.addEventListener('click', function() {
+      console.log('Start button clicked');
+      
+      // Close any existing test socket before starting the game
+      if (window.testSocket && window.testSocket.readyState !== WebSocket.CLOSED) {
+        console.log('Closing test socket before starting game');
+        window.testSocket.close();
+        window.testSocket = null;
+      }
+      
+      // Reset connection tracking
+      window.connectionInProgress = false;
+      
+      // Hide start screen and show game container
+      document.getElementById('start-screen').style.display = 'none';
+      gameContainer.style.display = 'block';
+      
+      // Show team buttons
+      const teamButtons = document.getElementById('team-buttons');
+      teamButtons.style.display = 'block';
+      console.log('Team buttons should now be visible:', teamButtons);
+      
+      // Load the game script
+      const script = document.createElement('script');
+      script.src = 'main.js';
+      document.body.appendChild(script);
+    });
+    
+    // Check if we're on a mobile browser
+    function isMobileBrowser() {
+      // Check for mobile user agents
+      const userAgentCheck = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      
+      // Check for touch capabilities
+      const hasTouchCapabilities = (
+        'ontouchstart' in window || 
+        navigator.maxTouchPoints > 0 || 
+        navigator.msMaxTouchPoints > 0
+      );
+      
+      // Consider a device mobile if it has a mobile user agent OR touch capabilities
+      const isMobile = userAgentCheck || hasTouchCapabilities;
+      
+      if (isMobile) {
+        console.log('Mobile/touch device detected');
+        if (hasTouchCapabilities) console.log('Touch capabilities detected');
+        if (userAgentCheck) console.log('Mobile user agent detected');
+      }
+      
+      return isMobile;
+    }
+    
+    // Check if assets are accessible
+    fetch('assets/ship.png')
+      .then(response => {
+        if (response.ok) {
+          console.log('Assets are accessible');
+          // Test connection after assets are verified
+          testConnection();
+          
+          // For mobile devices or if auto_start is true, automatically click the start button after connection is established
+          if (isMobileBrowser() || autoStart) {
+            console.log('Mobile device or auto_start detected, will auto-start game');
+            
+            // Create a function to check if we can start the game
+            function tryAutoStart() {
+              if (!startButton.disabled && connectionStatus.className.includes('success')) {
+                console.log('Auto-starting game for mobile device or auto_start parameter');
+                startButton.click();
+              } else {
+                console.log('Waiting for connection before auto-starting...');
+                setTimeout(tryAutoStart, 500);
+              }
+            }
+            
+            // Start checking after a short delay
+            setTimeout(tryAutoStart, 1000);
+          }
+        } else {
+          console.error('Assets are not accessible');
+          connectionStatus.style.display = 'block';
+          connectionStatus.textContent = 'Could not load game assets. Please refresh the page.';
+          connectionStatus.className = 'error';
+          startButton.disabled = true;
+        }
+      })
+      .catch(error => {
+        console.error('Error checking assets:', error);
+        connectionStatus.style.display = 'block';
+        connectionStatus.textContent = 'Error loading game assets. Please refresh the page.';
+        connectionStatus.className = 'error';
+        startButton.disabled = true;
+      });
+    
+    // Team switching functionality
+    document.getElementById('join-red-team').addEventListener('click', function() {
+      console.log('Red team button clicked');
+      if (window.gameInstance && window.gameInstance.switchTeam) {
+        console.log('Calling switchTeam with Red');
+        window.gameInstance.switchTeam('Red');
+      } else {
+        console.error('gameInstance or switchTeam not available', window.gameInstance);
+      }
+    });
+
+    document.getElementById('join-blue-team').addEventListener('click', function() {
+      console.log('Blue team button clicked');
+      if (window.gameInstance && window.gameInstance.switchTeam) {
+        console.log('Calling switchTeam with Blue');
+        window.gameInstance.switchTeam('Blue');
+      } else {
+        console.error('gameInstance or switchTeam not available', window.gameInstance);
+      }
+    });
+
+    document.getElementById('reset-game').addEventListener('click', function() {
+      console.log('Reset Game button clicked');
+      if (window.gameInstance && window.gameInstance.resetGame) {
+        console.log('Calling resetGame');
+        window.gameInstance.resetGame();
+      } else {
+        console.error('gameInstance or resetGame not available', window.gameInstance);
+      }
+    });
+  </script>
+</body>
+</html> 
