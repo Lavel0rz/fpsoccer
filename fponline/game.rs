@@ -130,6 +130,8 @@ impl Game {
                 owner: None,
                 last_shooter: None,
                 shot_clock: 10.0, // Initialize shot clock
+                pickup_cooldown: 0.0, // Initialize pickup cooldown
+                exclusive_team: None, // No team restriction initially
             },
             players: HashMap::new(),
             clients: HashMap::new(),
@@ -261,6 +263,19 @@ impl Game {
         if self.goal_cooldown > 0.0 {
             self.goal_cooldown -= fixed_dt;
             if self.goal_cooldown < 0.0 { self.goal_cooldown = 0.0; }
+        }
+        
+        // Update ball pickup cooldown
+        if self.ball.pickup_cooldown > 0.0 {
+            self.ball.pickup_cooldown -= fixed_dt;
+            if self.ball.pickup_cooldown < 0.0 { 
+                self.ball.pickup_cooldown = 0.0;
+                if let Some(ref team) = self.ball.exclusive_team {
+                    println!("Ball glow ended - now only {} team can grab it", team);
+                }
+                // Keep team restriction active even after cooldown expires
+                // It will only be cleared when the ball is grabbed by the exclusive team
+            }
         }
         
         // Update player cooldowns
@@ -804,6 +819,23 @@ impl Game {
                         continue;
                     }
                     
+                    // Check if ball is in pickup cooldown
+                    if self.ball.pickup_cooldown > 0.0 {
+                        continue; // No one can pick up the ball during cooldown (reduced logging)
+                    }
+                    
+                    // Check if ball has team restriction
+                    if let Some(ref exclusive_team) = self.ball.exclusive_team {
+                        let player_team_str = format!("{:?}", player.team);
+                        if player_team_str != *exclusive_team {
+                            // Only log when someone tries to grab but can't (reduced spam)
+                            continue; // Only the exclusive team can pick up the ball
+                        } else {
+                            println!("Player {} ({} team) can grab ball (exclusive access)", 
+                                player.id, player_team_str);
+                        }
+                    }
+                    
                     let dx = player.ship.x - self.ball.x;
                     let dy = player.ship.y - self.ball.y;
                     let dist2 = dx * dx + dy * dy;
@@ -830,8 +862,14 @@ impl Game {
                 }
                 
                 if let Some(player_id) = closest_id {
-                    println!("Ball grabbed during physics sub-step!");
+                    if let Some(player) = self.players.get(&player_id) {
+                        println!("Ball grabbed by player {} ({:?} team)", player_id, player.team);
+                    }
                     self.ball.grab(player_id, new_x, new_y);
+                    
+                    // Clear exclusive team restriction when ball is successfully grabbed (this will reset ball color on client)
+                    self.ball.exclusive_team = None;
+                    
                     break; // Exit the sub-step loop early since the ball is now grabbed
                 }
             }
@@ -1024,8 +1062,8 @@ impl Game {
         let ball_top = self.ball.y - BALL_HEIGHT / 2.0;
         let ball_bottom = self.ball.y + BALL_HEIGHT / 2.0;
         
-        // Debug: Log ball bounds
-        println!("Ball bounds: left={:.1}, right={:.1}, top={:.1}, bottom={:.1}", ball_left, ball_right, ball_top, ball_bottom);
+        // Debug: Log ball bounds (commented out to reduce spam)
+        // println!("Ball bounds: left={:.1}, right={:.1}, top={:.1}, bottom={:.1}", ball_left, ball_right, ball_top, ball_bottom);
         
         // Determine the middle Y position to distinguish north from south goals
         let mut min_y = f32::INFINITY;
@@ -1045,35 +1083,48 @@ impl Game {
         let middle_y = (min_y + max_y) / 2.0;
         let middle_x = (min_x + max_x) / 2.0;
         
-        println!("Ball position: ({}, {})", self.ball.x, self.ball.y);
-        println!("Goal Y range: {} to {}, middle: {}", min_y, max_y, middle_y);
+        // println!("Ball position: ({}, {})", self.ball.x, self.ball.y);
+        // println!("Goal Y range: {} to {}, middle: {}", min_y, max_y, middle_y);
         
         // Check if ball is in a goal area
         if self.goal_cooldown <= 0.0 {
             for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type.starts_with("goal_")) {
-                // Add debug print for each goal
-                println!("Checking goal: type={}, x={}, y={}, w={}, h={}", goal.obj_type, goal.x, goal.y, goal.width, goal.height);
+                // Add debug print for each goal (commented out to reduce spam)
+                // println!("Checking goal: type={}, x={}, y={}, w={}, h={}", goal.obj_type, goal.x, goal.y, goal.width, goal.height);
                 // Add a small margin to the collision check
                 let margin = 1.0;
                 if ball_right >= goal.x - margin && ball_left <= goal.x + goal.width + margin &&
                    ball_bottom >= goal.y - margin && ball_top <= goal.y + goal.height + margin {
-                    println!("Ball ({:.1},{:.1}) hit goal {} at ({},{})", self.ball.x, self.ball.y, goal.obj_type, goal.x, goal.y);
+                    println!("GOAL SCORED! Ball hit {} goal", goal.obj_type);
                     
-                    // Determine which team scored based on the goal type
-                    let (scoring_team, scored_on_team) = match goal.obj_type.as_str() {
-                        "goal_red" => (Team::Red, Team::Blue),
-                        "goal_blue" => (Team::Blue, Team::Red),
-                        "goal_yellow" => (Team::Yellow, Team::Green),
-                        "goal_green" => (Team::Green, Team::Yellow),
+                    // Determine which team was scored on based on the goal type
+                    let scored_on_team = match goal.obj_type.as_str() {
+                        "goal_red" => Team::Red,      // Red goal hit = Red team scored on
+                        "goal_blue" => Team::Blue,    // Blue goal hit = Blue team scored on  
+                        "goal_yellow" => Team::Yellow, // Yellow goal hit = Yellow team scored on
+                        "goal_green" => Team::Green,  // Green goal hit = Green team scored on
                         _ => continue, // Skip if not a valid goal type
                     };
                     
-                    // Update scores based on which team scored
-                    match scoring_team {
-                        Team::Red => self.team1_score += 1,
-                        Team::Blue => self.team2_score += 1,
-                        Team::Yellow => self.team3_score += 1,
-                        Team::Green => self.team4_score += 1,
+                    // Get the player who scored (last shooter)
+                    let scorer_name = if let Some(shooter_id) = self.ball.last_shooter {
+                        if let Some(player) = self.players.get(&shooter_id) {
+                            player.display_name.clone()
+                        } else {
+                            "Unknown Player".to_string()
+                        }
+                    } else {
+                        "Unknown Player".to_string()
+                    };
+                    
+                    // Update scores based on which team was scored on (they lose a point in this context, but we track goals scored against them)
+                    // In corner defense, when your goal is hit, the other teams get points
+                    // For simplicity, we'll just increment a general score counter
+                    match scored_on_team {
+                        Team::Red => self.team1_score += 1,      // Point scored against red
+                        Team::Blue => self.team2_score += 1,     // Point scored against blue
+                        Team::Yellow => self.team3_score += 1,   // Point scored against yellow
+                        Team::Green => self.team4_score += 1,    // Point scored against green
                     }
                     
                     // Reset ball position and state
@@ -1086,23 +1137,35 @@ impl Game {
                     self.ball.grab_cooldown = 0.5;
                     self.goal_cooldown = 2.0;
                     
+                    // Set pickup cooldown and team restriction
+                    self.ball.pickup_cooldown = 3.0; // 3 second cooldown
+                    self.ball.exclusive_team = Some(format!("{:?}", scored_on_team)); // Team that was scored on gets exclusive pickup
+                    
+                    println!("Ball glowing for 3s, then exclusive to {:?} team", scored_on_team);
+                    
                     // Send goal event to all clients
                     let goal_event = json!({
                         "type": "goal",
-                        "scoring_team": format!("{:?}", scoring_team),
                         "scored_on_team": format!("{:?}", scored_on_team),
+                        "scorer_name": scorer_name,
                         "team1_score": self.team1_score,
                         "team2_score": self.team2_score,
                         "team3_score": self.team3_score,
-                        "team4_score": self.team4_score
+                        "team4_score": self.team4_score,
+                        "ball_exclusive_team": format!("{:?}", scored_on_team)
                     });
                     
                     let goal_str = goal_event.to_string();
-                    for (_id, sender) in self.clients.iter_mut() {
+                    println!("Sending goal message to {} clients: {}", self.clients.len(), goal_str);
+                    for (client_id, sender) in self.clients.iter_mut() {
                         let msg = goal_str.clone();
                         let sender = Arc::clone(sender);
+                        let client_id = *client_id;
                         tokio::spawn(async move {
-                            let _ = sender.lock().await.send(Message::text(msg)).await;
+                            match sender.lock().await.send(Message::text(msg.clone())).await {
+                                Ok(_) => println!("Goal message sent to client {}", client_id),
+                                Err(e) => println!("Failed to send goal message to client {}: {:?}", client_id, e),
+                            }
                         });
                     }
                     
@@ -1177,6 +1240,8 @@ impl Game {
         self.ball.owner = None;
         self.ball.last_shooter = None;
         self.ball.shot_clock = 10.0;
+        self.ball.pickup_cooldown = 0.0;
+        self.ball.exclusive_team = None;
         
         // Reset player positions based on team - closer to the ball
         for (_, player) in self.players.iter_mut() {

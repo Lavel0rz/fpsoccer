@@ -7,9 +7,16 @@ use std::sync::Arc;
 use crate::game::Game;
 use crate::player::Player;
 use crate::player::Team;
+use crate::webrtc_signaling::{WebRTCSignalingManager, is_webrtc_message, parse_webrtc_message};
 use futures::{StreamExt, SinkExt};
 use serde::{Serialize, Deserialize};
 use warp::Filter;
+use once_cell::sync::Lazy;
+
+// Global WebRTC signaling manager
+static WEBRTC_MANAGER: Lazy<WebRTCSignalingManager> = Lazy::new(|| {
+    WebRTCSignalingManager::new()
+});
 
 #[derive(Deserialize, Debug)]
 pub struct InputMessage {
@@ -238,6 +245,25 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                         }
                     }
                     
+                    // Check for WebRTC signaling messages
+                    if is_webrtc_message(txt) {
+                        match parse_webrtc_message(txt) {
+                            Ok(webrtc_msg) => {
+                                println!("Received WebRTC message from player {}: {:?}", player_id, webrtc_msg.message_type);
+                                
+                                // Handle WebRTC signaling
+                                let game = game.lock().await;
+                                if let Err(e) = WEBRTC_MANAGER.handle_webrtc_message(&webrtc_msg, player_id, &game.clients).await {
+                                    eprintln!("Error handling WebRTC message: {:?}", e);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to parse WebRTC message from player {}: {:?}", player_id, e);
+                            }
+                        }
+                        continue;
+                    }
+                    
                     // Check for reset game message
                     if txt.contains("\"type\":\"reset_game\"") || txt.contains("\"type\": \"reset_game\"") {
                         println!("Received reset game request from player {}", player_id);
@@ -295,7 +321,7 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                                     if boost {
                                         println!("Player {} is firing a projectile. Current cooldown: {}", player_id, player.rocket_cooldown);
                                     } else {
-                                        println!("Player {} released boost button", player_id);
+                                        // println!("Player {} released boost button", player_id); // Commented out to reduce spam
                                     }
                                     player.input.boost = boost;
                                 }
@@ -339,6 +365,10 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
     }
     
     let mut game_lock = game.lock().await;
+    
+    // Clean up WebRTC connections for this player
+    WEBRTC_MANAGER.handle_client_disconnect(player_id, &game_lock.clients).await;
+    
     game_lock.clients.remove(&player_id);
     
     // Remove player and update team counts
@@ -367,4 +397,9 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
 
 pub fn with_game(game: Arc<Mutex<Game>>) -> impl warp::Filter<Extract = (Arc<Mutex<Game>>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || game.clone())
+}
+
+// Public function for WebRTC cleanup
+pub async fn cleanup_webrtc_offers() {
+    WEBRTC_MANAGER.cleanup_old_offers().await;
 } 

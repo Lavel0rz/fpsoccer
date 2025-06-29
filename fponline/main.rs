@@ -4,6 +4,7 @@ mod ball;
 mod collision;
 mod websocket;
 mod lobby;
+mod webrtc_signaling;
 
 use warp::Filter;
 use tokio::sync::Mutex;
@@ -86,17 +87,27 @@ async fn main() {
         crate::game::game_update_loop().await;
     });
     
-    // Start a periodic task to clean up empty games
+    // Start a periodic task to clean up empty games (only for lobby-managed games)
     let lobby_for_cleanup = LOBBY_MANAGER.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            println!("Running periodic cleanup task...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await; // Reduced frequency: every 5 minutes
+            // println!("Running periodic cleanup task..."); // Commented out to reduce spam
             let mut lobby = lobby_for_cleanup.lock().await;
             lobby.cleanup_empty_games();
             
-            // Debug print all games
-            lobby.debug_print_games();
+            // Only print debug info if there are actually games to show
+            if !lobby.games.is_empty() {
+                lobby.debug_print_games();
+            }
+        }
+    });
+    
+    // Start periodic WebRTC cleanup task
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await; // Every 30 seconds
+            crate::websocket::cleanup_webrtc_offers().await;
         }
     });
     
