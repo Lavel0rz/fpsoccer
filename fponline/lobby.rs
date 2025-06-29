@@ -478,7 +478,7 @@ pub async fn game_update_loop_for_instance(game: Arc<Mutex<Game>>) {
                 
                 // Only update if there are active players
                 if !game.players.is_empty() {
-                    game.update(fixed_dt, game_width, game_height);
+                    game.update(fixed_dt, game_width, game_height, None);
                 }
                 
                 // Check if the game is empty

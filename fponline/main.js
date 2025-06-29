@@ -201,6 +201,17 @@ class MainScene extends Phaser.Scene {
     this.createTeamPieMenu = () => {
       // ... code ...
     };
+
+    this.nextSequence = 0;
+    this.lastPingTime = 0;
+    this.pingInterval = 1000; // 1 second
+    this.lastInputTime = 0;
+    
+    // Store current mouse world position for accurate shooting
+    this.currentMouseWorldPos = { x: 400, y: 300 }; // Initialize to center of screen
+
+    // Initialize team scores
+    this.team1Score = 0;
   }
   
   // Detect if we're on a mobile device
@@ -628,14 +639,9 @@ class MainScene extends Phaser.Scene {
             // Reset reconnection attempts on successful connection
             this.reconnectAttempts = 0;
             
-            if (connectionStatus) {
-              connectionStatus.textContent = 'Connected to game server';
-              connectionStatus.className = 'connected';
-              
-              // Hide the status after a few seconds
-              setTimeout(() => {
-                connectionStatus.style.opacity = '0';
-              }, 3000);
+            // Update connection status if the function exists
+            if (typeof updateConnectionStatus === 'function') {
+              updateConnectionStatus('connected', 'Connected to game server');
             }
             
             // Start sending regular pings to keep the connection alive (especially for mobile)
@@ -735,15 +741,21 @@ class MainScene extends Phaser.Scene {
                 this.isHost = msg.is_host;
                 console.log('Assigned client ID:', this.clientId, 'Team:', this.playerTeam, 'Host:', this.isHost);
                 
-                // Initialize WebRTC manager now that we have a client ID
-                if (window.WebRTCManager && !this.webrtcManager) {
-                  console.log('Initializing WebRTC manager...');
-                  this.webrtcManager = new window.WebRTCManager(this);
-                  this.webrtcManager.initialize().catch(error => {
-                    console.error('Failed to initialize WebRTC:', error);
+                // Initialize Fast Channel manager now that we have a client ID
+                if (window.FastChannelManager && !this.fastChannelManager) {
+                  console.log('Initializing Fast Channel manager...');
+                  this.fastChannelManager = new window.FastChannelManager(this);
+                  this.fastChannelManager.initialize().catch(error => {
+                    console.error('Failed to initialize Fast Channel:', error);
                   });
-                } else if (!window.WebRTCManager) {
-                  console.warn('WebRTC manager not available');
+                } else if (!window.FastChannelManager) {
+                  console.warn('Fast Channel manager not available');
+                }
+                
+                // Keep legacy WebRTC manager for compatibility but don't initialize it
+                // This prevents peer requests but allows status monitoring
+                if (window.WebRTCManager && !this.webrtcManager) {
+                  console.log('Legacy WebRTC manager available but not initializing (using Fast Channels instead)');
                 }
                 
                 // Update team text and ship color
@@ -1363,25 +1375,51 @@ class MainScene extends Phaser.Scene {
     this.inputState.boost = currentBoost;
     this.inputState.shoot = currentShoot;
     
-    // Update target direction for movement
-    this.targetDirection.x = this.joystickForceX;
-    this.targetDirection.y = this.joystickForceY;
+    // Convert joystick input to discrete 4-direction movement (same as desktop)
+    const movementDirection = {
+      x: this.joystickForceX,
+      y: this.joystickForceY
+    };
     
-    // Also update movement direction for consistent rotation
-    this.movementDirection.x = this.joystickForceX;
-    this.movementDirection.y = this.joystickForceY;
+    // Use the same discrete direction system as desktop
+    const discreteDirection = this.getDirectionFromVector(movementDirection);
+    const discreteDirectionVector = this.getDirectionVector(discreteDirection);
     
-    // Update ship rotation to face the joystick direction
+    // Update movement direction to discrete values (consistent with desktop)
+    this.movementDirection.x = discreteDirectionVector.x;
+    this.movementDirection.y = discreteDirectionVector.y;
+    
+    // Update target direction for consistent behavior
+    this.targetDirection.x = discreteDirectionVector.x;
+    this.targetDirection.y = discreteDirectionVector.y;
+    
+    // Update ship animation using the same system as desktop (4-direction sprites)
     if (this.joystickForce > 0.1) {
-      const angle = Math.atan2(this.joystickForceY, this.joystickForceX);
-      this.ship.rotation = angle;
+      this.updateShipAnimation(this.ship, discreteDirectionVector, true);
       
-      // Update cannon position and rotation
+      // Update cannon position based on discrete direction (not rotation)
       this.updateCannonPosition();
     }
     
     // Send input to server
     this.sendInput();
+  }
+  
+  // Update current mouse world position for accurate shooting
+  updateMouseWorldPosition() {
+    if (this.input.activePointer) {
+      // Use Phaser 3 activePointer for mouse world coordinates
+      this.currentMouseWorldPos.x = this.input.activePointer.worldX;
+      this.currentMouseWorldPos.y = this.input.activePointer.worldY;
+      
+      // Debug logging (remove later)
+      if (Math.random() < 0.01) { // Log 1% of the time to avoid spam
+        console.log('Mouse screen:', this.input.activePointer.x, this.input.activePointer.y);
+        console.log('Mouse world:', this.input.activePointer.worldX.toFixed(1), this.input.activePointer.worldY.toFixed(1));
+        console.log('Ship pos:', this.ship ? this.ship.x.toFixed(1) : 'N/A', this.ship ? this.ship.y.toFixed(1) : 'N/A');
+      }
+    }
+    // Don't update if no mouse input - keep the last known position
   }
   
   updateInputState(key, isDown) {
@@ -1423,24 +1461,38 @@ class MainScene extends Phaser.Scene {
     if (this.playerCanMove !== false && this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.inputSequence++;
       
-      // Calculate aim target based on mouse position (world coordinates) or aimTarget for mobile
+      // Use the continuously updated mouse world position for accurate shooting
       let targetX = this.ship.x;
       let targetY = this.ship.y;
       
-      if (this.input.mouse && this.input.mouse.x !== undefined && this.input.mouse.y !== undefined) {
-        // Convert screen coordinates to world coordinates for desktop
-        const worldPoint = this.cameras.main.getWorldPoint(this.input.mouse.x, this.input.mouse.y);
-        targetX = worldPoint.x;
-        targetY = worldPoint.y;
-      } else if (this.aimTarget && this.aimTarget.x !== undefined && this.aimTarget.y !== undefined) {
+      if (this.isMobile && this.aimTarget && this.aimTarget.x !== undefined && this.aimTarget.y !== undefined) {
         // Use aimTarget for mobile devices
         targetX = this.aimTarget.x;
         targetY = this.aimTarget.y;
+      } else if (this.input.activePointer) {
+        // Use Phaser 3 correct mouse API - activePointer gives us world coordinates directly
+        targetX = this.input.activePointer.worldX;
+        targetY = this.input.activePointer.worldY;
+      } else {
+        // Fallback to stored position
+        targetX = this.currentMouseWorldPos.x;
+        targetY = this.currentMouseWorldPos.y;
       }
       
       // Log shooting state for debugging
       if (this.inputState.shoot) {
-        console.log('Sending shoot command to server');
+        console.log('=== SHOOTING DEBUG ===');
+        console.log('Ship position:', this.ship.x.toFixed(1), this.ship.y.toFixed(1));
+        console.log('Target position:', targetX.toFixed(1), targetY.toFixed(1));
+        if (this.input.activePointer) {
+          console.log('Mouse screen pos:', this.input.activePointer.x, this.input.activePointer.y);
+          console.log('Mouse world pos:', this.input.activePointer.worldX.toFixed(1), this.input.activePointer.worldY.toFixed(1));
+        }
+        console.log('Camera scroll:', this.cameras.main.scrollX.toFixed(1), this.cameras.main.scrollY.toFixed(1));
+        const dx = targetX - this.ship.x;
+        const dy = targetY - this.ship.y;
+        console.log('Shot direction:', dx.toFixed(1), dy.toFixed(1));
+        console.log('Shot angle (degrees):', (Math.atan2(dy, dx) * 180 / Math.PI).toFixed(1));
       }
       
       // Log boost state for debugging
@@ -1472,7 +1524,12 @@ class MainScene extends Phaser.Scene {
         };
       }
       
-      this.socket.send(JSON.stringify(input));
+      // Use fast channel manager for smart routing, fallback to direct WebSocket
+      if (this.fastChannelManager) {
+        this.fastChannelManager.sendMessage(input);
+      } else {
+        this.socket.send(JSON.stringify(input));
+      }
       this.lastInputTime = Date.now();
     }
   }
@@ -2060,6 +2117,8 @@ class MainScene extends Phaser.Scene {
     if (this.isMobile && this.joystick) {
       this.updateJoystickInput();
     }
+    
+    // Mouse position is now calculated directly when shooting for better accuracy
     
     // Generate particles based on ship movement
     this.generateParticles();
@@ -3497,13 +3556,14 @@ class MainScene extends Phaser.Scene {
     // For the player's cannon, use mouse aim direction or aimTarget for mobile
     let direction = { x: 0, y: 1 }; // Default to down
     
-    if (this.input.mouse && this.input.mouse.x !== undefined && this.input.mouse.y !== undefined) {
-      // Convert screen coordinates to world coordinates for desktop
-      const worldPoint = this.cameras.main.getWorldPoint(this.input.mouse.x, this.input.mouse.y);
+    if (this.input.activePointer) {
+      // Use Phaser 3 activePointer for mouse world coordinates
+      const mouseWorldX = this.input.activePointer.worldX;
+      const mouseWorldY = this.input.activePointer.worldY;
       
       // Calculate direction from ship to mouse position
-      const dx = worldPoint.x - this.ship.x;
-      const dy = worldPoint.y - this.ship.y;
+      const dx = mouseWorldX - this.ship.x;
+      const dy = mouseWorldY - this.ship.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
       
       if (distance > 0) {
@@ -3546,6 +3606,17 @@ class MainScene extends Phaser.Scene {
       return direction.x > 0 ? 'right' : 'left';
     } else {
       return direction.y > 0 ? 'down' : 'up';
+    }
+  }
+  
+  // Helper method to convert discrete direction to vector
+  getDirectionVector(direction) {
+    switch (direction) {
+      case 'up': return { x: 0, y: -1 };
+      case 'down': return { x: 0, y: 1 };
+      case 'left': return { x: -1, y: 0 };
+      case 'right': return { x: 1, y: 0 };
+      default: return { x: 0, y: 0 };
     }
   }
   
@@ -3915,3 +3986,4 @@ MainScene.prototype.updateTeamDisplay = function(team) {
   if (oldUpdateTeamDisplay) oldUpdateTeamDisplay.call(this, team);
   this.createTeamPieMenu();
 };
+

@@ -14,6 +14,7 @@ use warp::ws::{Message, WebSocket};
 use futures::stream::SplitSink;
 use futures::SinkExt;
 use rand;
+use crate::dual_connection::{MessageType};
 
 #[derive(Debug)]
 pub struct InputState {
@@ -257,7 +258,20 @@ impl Game {
         self.clients.remove(&player_id);
     }
 
-    pub fn update(&mut self, fixed_dt: f32, game_width: f32, game_height: f32) {
+    // Helper function to broadcast event messages to all players
+    fn broadcast_event(&self, dual_mgr: Option<&'static crate::dual_connection::DualConnectionManager>, message_type: MessageType, data: serde_json::Value) {
+        if let Some(mgr) = dual_mgr {
+            for &client_id in self.players.keys() {
+                let msg_type = message_type.clone();
+                let msg_data = data.clone();
+                tokio::spawn(async move {
+                    let _ = mgr.send_to_client(client_id, msg_type, msg_data).await;
+                });
+            }
+        }
+    }
+
+    pub fn update(&mut self, fixed_dt: f32, game_width: f32, game_height: f32, dual_mgr: Option<&'static crate::dual_connection::DualConnectionManager>) {
         // Update cooldowns (remove ball grab cooldown update)
         // Update goal cooldown
         if self.goal_cooldown > 0.0 {
@@ -397,14 +411,7 @@ impl Game {
                             "player_id": owner_id
                         });
                         
-                        let auto_shoot_str = auto_shoot_event.to_string();
-                        for (_id, sender) in self.clients.iter_mut() {
-                            let msg = auto_shoot_str.clone();
-                            let sender = Arc::clone(sender);
-                            tokio::spawn(async move {
-                                let _ = sender.lock().await.send(Message::text(msg)).await;
-                            });
-                        }
+                        self.broadcast_event(dual_mgr, MessageType::AutoShoot, auto_shoot_event);
                     }
                 }
             }
@@ -420,6 +427,7 @@ impl Game {
         // Update players' ships
         let ball_grabbed = self.ball.grabbed;
         let ball_owner = self.ball.owner;
+        let mut events_to_broadcast = Vec::new();
         for player in self.players.values_mut() {
             let slowdown = if ball_grabbed && ball_owner == Some(player.id) { 0.8 } else { 1.0 };
             let acceleration = 200.0 * slowdown;
@@ -526,22 +534,20 @@ impl Game {
                     player.velocity.0 -= dir_x * projectile_speed * recoil_factor;
                     player.velocity.1 -= dir_y * projectile_speed * recoil_factor;
                     
-                    // Send a message to all clients about the projectile
+                    // Collect event to broadcast after mutable borrow ends
                     let projectile_event = json!({
                         "type": "projectile_fired",
                         "player_id": player.id
                     });
                     
-                    let projectile_str = projectile_event.to_string();
-                    for (_id, sender) in self.clients.iter_mut() {
-                        let msg = projectile_str.clone();
-                        let sender = Arc::clone(sender);
-                        tokio::spawn(async move {
-                            let _ = sender.lock().await.send(Message::text(msg)).await;
-                        });
-                    }
+                    events_to_broadcast.push((MessageType::ProjectileFired, projectile_event));
                 }
             }
+        }
+        
+        // Broadcast collected events after mutable borrow ends
+        for (msg_type, event_data) in events_to_broadcast {
+            self.broadcast_event(dual_mgr, msg_type, event_data);
         }
 
         // Ship-Wall Collision Resolution
@@ -640,14 +646,7 @@ impl Game {
                             "player_id": owner_id
                         });
                         
-                        let shoot_str = shoot_event.to_string();
-                        for (_id, sender) in self.clients.iter_mut() {
-                            let msg = shoot_str.clone();
-                            let sender = Arc::clone(sender);
-                            tokio::spawn(async move {
-                                let _ = sender.lock().await.send(Message::text(msg)).await;
-                            });
-                        }
+                        self.broadcast_event(dual_mgr, MessageType::BallShot, shoot_event);
                     }
                 }
             }
@@ -748,14 +747,7 @@ impl Game {
                                     "player_id": owner_id
                                 });
                                 
-                                let knock_str = knock_event.to_string();
-                                for (_id, sender) in self.clients.iter_mut() {
-                                    let msg = knock_str.clone();
-                                    let sender = Arc::clone(sender);
-                                    tokio::spawn(async move {
-                                        let _ = sender.lock().await.send(Message::text(msg)).await;
-                                    });
-                                }
+                                self.broadcast_event(dual_mgr, MessageType::BallKnocked, knock_event);
                             }
                         }
                     }
@@ -922,7 +914,7 @@ impl Game {
             
             // Check for goal collision if not in cooldown
             if self.goal_cooldown <= 0.0 && !self.ball.grabbed {
-                self.check_goal_collision(game_width, game_height);
+                self.check_goal_collision(game_width, game_height, dual_mgr);
             }
         }
 
@@ -1012,7 +1004,7 @@ impl Game {
         for &index in projectiles_to_explode.iter() {
             if index < self.projectiles.len() {
                 let projectile = &self.projectiles[index];
-                self.create_explosion(projectile.x, projectile.y, projectile.owner_id);
+                self.create_explosion(projectile.x, projectile.y, projectile.owner_id, dual_mgr);
                 self.projectiles[index].active = false;
             }
         }
@@ -1020,43 +1012,11 @@ impl Game {
         // Remove inactive projectiles
         self.projectiles.retain(|p| p.active);
 
-        // Build and broadcast game state
-        let now = Utc::now().timestamp_millis() as u64;
-        let mut players_snapshot = HashMap::new();
-        for (id, player) in self.players.iter() {
-            players_snapshot.insert(*id, ShipState {
-                x: player.ship.x,
-                y: player.ship.y,
-                seq: player.last_seq,
-                boost: player.boost,
-                team: player.team,
-                display_name: player.display_name.clone(),
-                rocket_cooldown: player.rocket_cooldown,
-            });
-        }
-        let snapshot = json!(GameStateSnapshot {
-            time: now,
-            players: players_snapshot,
-            ball: self.ball.clone(),
-            projectiles: self.projectiles.clone(),
-            team1_score: self.team1_score,
-            team2_score: self.team2_score,
-            team3_score: self.team3_score,
-            team4_score: self.team4_score,
-        });
-        let snapshot_str = snapshot.to_string();
-        for (_id, sender) in self.clients.iter_mut() {
-            let msg = snapshot_str.clone();
-            let sender = Arc::clone(sender);
-            tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(0)).await;
-                let _ = sender.lock().await.send(Message::text(msg)).await;
-            });
-        }
+        // Note: Game state broadcasting is now handled by the game loop via DualConnectionManager
     }
     
     // Add a method to check for goal collisions
-    fn check_goal_collision(&mut self, _game_width: f32, _game_height: f32) {
+    fn check_goal_collision(&mut self, _game_width: f32, _game_height: f32, dual_mgr: Option<&'static crate::dual_connection::DualConnectionManager>) {
         let ball_left = self.ball.x - BALL_WIDTH / 2.0;
         let ball_right = self.ball.x + BALL_WIDTH / 2.0;
         let ball_top = self.ball.y - BALL_HEIGHT / 2.0;
@@ -1155,19 +1115,8 @@ impl Game {
                         "ball_exclusive_team": format!("{:?}", scored_on_team)
                     });
                     
-                    let goal_str = goal_event.to_string();
-                    println!("Sending goal message to {} clients: {}", self.clients.len(), goal_str);
-                    for (client_id, sender) in self.clients.iter_mut() {
-                        let msg = goal_str.clone();
-                        let sender = Arc::clone(sender);
-                        let client_id = *client_id;
-                        tokio::spawn(async move {
-                            match sender.lock().await.send(Message::text(msg.clone())).await {
-                                Ok(_) => println!("Goal message sent to client {}", client_id),
-                                Err(e) => println!("Failed to send goal message to client {}: {:?}", client_id, e),
-                            }
-                        });
-                    }
+                    println!("Sending goal message to {} clients", self.players.len());
+                    self.broadcast_event(dual_mgr, MessageType::Goal, goal_event);
                     
                     break;
                 }
@@ -1202,7 +1151,7 @@ impl Game {
     }
     
     // Add a method to reset the game
-    pub fn reset_game(&mut self) {
+    pub fn reset_game(&mut self, dual_mgr: Option<&'static crate::dual_connection::DualConnectionManager>) {
         // Reset scores
         self.team1_score = 0;
         self.team2_score = 0;
@@ -1286,72 +1235,61 @@ impl Game {
             "team4_score": self.team4_score
         });
         
-        let reset_str = reset_event.to_string();
-        for (_id, sender) in self.clients.iter_mut() {
-            let msg = reset_str.clone();
-            let sender = Arc::clone(sender);
-            tokio::spawn(async move {
-                let _ = sender.lock().await.send(Message::text(msg)).await;
-            });
-        }
+        self.broadcast_event(dual_mgr, MessageType::GameReset, reset_event);
         
         // Start countdown
-        self.start_countdown();
+        self.start_countdown(dual_mgr);
         
         // Clear all projectiles
         self.projectiles.clear();
     }
     
     // Add a method to start the countdown
-    pub fn start_countdown(&self) {
-        let clients = self.clients.clone();
+    pub fn start_countdown(&self, dual_mgr: Option<&'static crate::dual_connection::DualConnectionManager>) {
+        // Get player IDs to broadcast to
+        let player_ids: Vec<u32> = self.players.keys().cloned().collect();
         
         // Spawn a task to handle the countdown
-        tokio::spawn(async move {
-            for count in (1..=5).rev() {
-                // Send countdown message to all clients
-                let countdown_event = serde_json::json!({
-                    "type": "countdown",
-                    "count": count
-                });
-                
-                let countdown_str = countdown_event.to_string();
-                for (_id, sender) in clients.iter() {
-                    let msg = countdown_str.clone();
-                    let sender = Arc::clone(sender);
-                    tokio::spawn(async move {
-                        let _ = sender.lock().await.send(Message::text(msg)).await;
+        if let Some(mgr) = dual_mgr {
+            tokio::spawn(async move {
+                for count in (1..=5).rev() {
+                    // Send countdown message to all clients
+                    let countdown_event = serde_json::json!({
+                        "type": "countdown",
+                        "count": count
                     });
+                    
+                    // Broadcast to all players
+                    for &client_id in &player_ids {
+                        let _ = mgr.send_to_client(client_id, MessageType::Countdown, countdown_event.clone()).await;
+                    }
+                    
+                    // Wait 1 second
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
                 
-                // Wait 1 second
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
-            
-            // Send final countdown message (0) to indicate game start
-            let start_event = serde_json::json!({
-                "type": "countdown",
-                "count": 0
-            });
-            
-            let start_str = start_event.to_string();
-            for (_id, sender) in clients.iter() {
-                let msg = start_str.clone();
-                let sender = Arc::clone(sender);
-                tokio::spawn(async move {
-                    let _ = sender.lock().await.send(Message::text(msg)).await;
+                // Send final countdown message (0) to indicate game start
+                let start_event = serde_json::json!({
+                    "type": "countdown",
+                    "count": 0
                 });
-            }
-        });
+                
+                // Broadcast game start to all players
+                for &client_id in &player_ids {
+                    let _ = mgr.send_to_client(client_id, MessageType::Countdown, start_event.clone()).await;
+                }
+            });
+        }
     }
 
     // Add a method to create an explosion effect
-    fn create_explosion(&mut self, x: f32, y: f32, owner_id: u32) {
+    fn create_explosion(&mut self, x: f32, y: f32, owner_id: u32, dual_mgr: Option<&'static crate::dual_connection::DualConnectionManager>) {
         // Define explosion parameters
         let explosion_radius = 100.0;
         let explosion_force = 300.0;
         
         // Apply knockback to players in range
+        let mut events_to_broadcast = Vec::new();
         for (player_id, player) in self.players.iter_mut() {
             let dx = player.ship.x - x;
             let dy = player.ship.y - y;
@@ -1385,22 +1323,20 @@ impl Game {
                     // Apply grab cooldown
                     player.grab_cooldown = 0.5;
                     
-                    // Send a message about the ball being knocked loose
+                    // Collect event to broadcast after mutable borrow ends  
                     let knock_event = json!({
                         "type": "ball_knocked",
                         "player_id": *player_id
                     });
                     
-                    let knock_str = knock_event.to_string();
-                    for (_id, sender) in self.clients.iter_mut() {
-                        let msg = knock_str.clone();
-                        let sender = Arc::clone(sender);
-                        tokio::spawn(async move {
-                            let _ = sender.lock().await.send(Message::text(msg)).await;
-                        });
-                    }
+                    events_to_broadcast.push((MessageType::BallKnocked, knock_event));
                 }
             }
+        }
+        
+        // Broadcast collected events after mutable borrow ends
+        for (msg_type, event_data) in events_to_broadcast {
+            self.broadcast_event(dual_mgr, msg_type, event_data);
         }
         
         // Apply knockback to the ball if it's not grabbed
@@ -1444,14 +1380,7 @@ impl Game {
             "player_id": owner_id
         });
         
-        let explosion_str = explosion_event.to_string();
-        for (_id, sender) in self.clients.iter_mut() {
-            let msg = explosion_str.clone();
-            let sender = Arc::clone(sender);
-            tokio::spawn(async move {
-                let _ = sender.lock().await.send(Message::text(msg)).await;
-            });
-        }
+        self.broadcast_event(dual_mgr, MessageType::Explosion, explosion_event);
     }
 
     // Helper function to safely position the ball after shooting
@@ -1509,7 +1438,7 @@ impl Game {
 
 pub static GLOBAL_GAME: Lazy<Arc<Mutex<Game>>> = Lazy::new(|| Arc::new(Mutex::new(Game::new())));
 
-pub async fn game_update_loop() {
+pub async fn game_update_loop(dual_mgr: &'static crate::dual_connection::DualConnectionManager) {
     let fixed_dt = 0.1;
     let sub_steps = 10;
     let _sub_dt = fixed_dt / sub_steps as f32;
@@ -1518,7 +1447,16 @@ pub async fn game_update_loop() {
     loop {
         {
             let mut game = GLOBAL_GAME.lock().await;
-            game.update(fixed_dt, game_width, game_height);
+            game.update(fixed_dt, game_width, game_height, Some(dual_mgr));
+            
+            // Send state updates via DualConnectionManager
+            let snapshot = game.create_snapshot();
+            let snapshot_json = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+            
+            // Get all connected client IDs and broadcast state
+            for &client_id in game.players.keys() {
+                let _ = dual_mgr.send_to_client(client_id, MessageType::GameState, snapshot_json.clone()).await;
+            }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis((fixed_dt * 700.0) as u64)).await;
     }

@@ -8,6 +8,7 @@ use crate::game::Game;
 use crate::player::Player;
 use crate::player::Team;
 use crate::webrtc_signaling::{WebRTCSignalingManager, is_webrtc_message, parse_webrtc_message};
+use crate::dual_connection::{DualConnectionManager, MessageType};
 use futures::{StreamExt, SinkExt};
 use serde::{Serialize, Deserialize};
 use warp::Filter;
@@ -50,7 +51,7 @@ struct TeamSwitchMessage {
     team: String,
 }
 
-pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
+pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>, dual_mgr: &'static DualConnectionManager) {
     let (tx, mut rx) = ws.split();
     let tx = Arc::new(Mutex::new(tx));
 
@@ -60,7 +61,7 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
         let id = game_lock.next_id;
         game_lock.next_id += 1;
         
-        println!("New player connected with ID: {}", id);
+        println!("New reliable connection for player ID: {}", id);
         
         // Assign the player to a team (red or blue)
         let team = game_lock.assign_team();
@@ -75,8 +76,8 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
         player.is_host = is_host; // Set host status
         game_lock.players.insert(id, player);
         
-        // Store the client's WebSocket sender
-        game_lock.clients.insert(id, Arc::clone(&tx));
+        // Note: We no longer store WebSocket senders directly in game.clients
+        // The dual connection manager handles all connections
         
         // Log the number of players in this game instance
         println!("Game now has {} players (Red: {}, Blue: {}, Yellow: {}, Green: {})", 
@@ -88,6 +89,9 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
         
         (id, team, is_host)
     };
+    
+    // Add reliable connection to dual connection manager  
+    dual_mgr.add_reliable_connection(player_id, Arc::clone(&tx)).await;
 
     // Send initial player ID, team, and host status to the client
     {
@@ -104,7 +108,9 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
             "team": team_str,
             "is_host": is_host
         });
-        tx.lock().await.send(Message::text(init_msg.to_string())).await.unwrap();
+        
+        // Send via dual connection manager (reliable channel)
+        let _ = dual_mgr.send_to_client(player_id, MessageType::PlayerJoin, init_msg).await;
     }
 
     while let Some(result) = rx.next().await {
@@ -280,7 +286,7 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                         if is_player_host {
                             println!("Player {} is host, processing reset game request", player_id);
                             let mut game_lock = game.lock().await;
-                            game_lock.reset_game();
+                            game_lock.reset_game(Some(dual_mgr));
                         } else {
                             println!("Player {} is not host, ignoring reset game request", player_id);
                             // Optionally send a message back to the client that they don't have permission
@@ -400,6 +406,74 @@ pub fn with_game(game: Arc<Mutex<Game>>) -> impl warp::Filter<Extract = (Arc<Mut
 }
 
 // Public function for WebRTC cleanup
+// Handle fast channel connections (for low-latency data)
+pub async fn handle_fast_connection(ws: WebSocket, game: Arc<Mutex<Game>>, dual_mgr: &'static DualConnectionManager) {
+    println!("Fast channel connection request received - handler called");
+    let (tx, mut rx) = ws.split();
+    
+    // Wait for client to identify themselves
+    println!("Waiting for fast channel handshake...");
+    if let Some(result) = rx.next().await {
+        if let Ok(msg) = result {
+            if msg.is_text() {
+                let txt = msg.to_str().unwrap_or_default();
+                
+                // Parse client ID from handshake message
+                if let Ok(handshake) = serde_json::from_str::<serde_json::Value>(txt) {
+                    if let Some(client_id) = handshake.get("client_id").and_then(|v| v.as_u64()) {
+                        let client_id = client_id as u32;
+                        println!("Fast channel handshake from client {}", client_id);
+                        
+                        // Add fast connection to dual connection manager
+                        dual_mgr.add_fast_connection(client_id, tx).await;
+                        
+                        // Process fast channel messages
+                        while let Some(result) = rx.next().await {
+                            match result {
+                                Ok(msg) => {
+                                    if msg.is_text() {
+                                        let txt = msg.to_str().unwrap_or_default();
+                                        println!("Fast channel received ANY message from client {}: {}", client_id, txt);
+                                        
+                                        // Parse and process input messages
+                                        if let Ok(input_msg) = serde_json::from_str::<InputMessage>(txt) {
+                                            // Process input immediately with game state
+                                            let mut game_state = game.lock().await;
+                                            if let Some(player) = game_state.players.get_mut(&client_id) {
+                                                player.input.left = input_msg.left;
+                                                player.input.right = input_msg.right;
+                                                player.input.up = input_msg.up;
+                                                player.input.down = input_msg.down;
+                                                player.input.boost = input_msg.boost.unwrap_or(false);
+                                                player.input.target_x = input_msg.target_x;
+                                                player.input.target_y = input_msg.target_y;
+                                                player.input.shoot = input_msg.shoot.unwrap_or(false);
+                                            }
+                                        } else {
+                                            println!("Fast channel received non-input message from client {}: {}", client_id, txt);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("Fast channel error for client {}: {:?}", client_id, e);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        println!("Fast channel disconnected for client {}", client_id);
+                        return;
+                    }
+                }
+                
+                println!("Invalid fast channel handshake: {}", txt);
+            }
+        }
+    }
+    
+    println!("Fast channel connection failed - no valid handshake");
+}
+
 pub async fn cleanup_webrtc_offers() {
     WEBRTC_MANAGER.cleanup_old_offers().await;
 } 

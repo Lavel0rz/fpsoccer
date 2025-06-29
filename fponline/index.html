@@ -201,6 +201,7 @@
     <!-- WebRTC Networking (Load before main game) -->
     <script src="networking/webrtc-manager.js"></script>
     <script src="networking/hybrid-networking-integration.js"></script>
+    <script src="networking/fast-channel-manager.js"></script>
     
     <!-- Main Game Script -->
     <script src="main.js"></script>
@@ -354,30 +355,44 @@
             }
         }
         
-        // Update WebRTC status
+        // Update Fast Channel status
         function updateWebRTCStatus(message, isConnected = false) {
             const statusElement = document.getElementById('webrtc-status');
             if (statusElement) {
-                statusElement.textContent = `WebRTC: ${message}`;
+                statusElement.textContent = `${message}`;
                 statusElement.style.color = isConnected ? '#00ff00' : '#ffff00';
             }
         }
         
         // Update network stats with better formatting
-        function updateNetworkStats(webSocketPing, webRTCPeers, webRTCLatency) {
+        function updateNetworkStats(webSocketPing, fastChannelStatus, fastChannelLatency) {
             if (!window.ENABLE_NETWORK_STATS) return;
             
             const statsElement = document.getElementById('network-stats');
             if (statsElement) {
                 const wsStatus = webSocketPing > 0 ? `${webSocketPing}ms` : 'Not connected';
-                const rtcStatus = webRTCPeers > 0 ? `${webRTCPeers} peers` : 'No peers';
+                let fastStatus, modeText, modeColor;
+                
+                if (fastChannelStatus === 1) {
+                    fastStatus = 'Connected';
+                    modeText = 'Enhanced Mode ⚡';
+                    modeColor = '#00ff00';
+                } else if (fastChannelStatus === -1) {
+                    fastStatus = 'Disabled';
+                    modeText = 'Basic Mode (Server not upgraded)';
+                    modeColor = '#ffaa00';
+                } else {
+                    fastStatus = 'Disconnected';
+                    modeText = 'Basic Mode';
+                    modeColor = '#ffaa00';
+                }
                 
                 statsElement.innerHTML = `
                     <strong>Network Status:</strong><br>
                     WebSocket: ${wsStatus}<br>
-                    WebRTC: ${rtcStatus}<br>
-                    ${webRTCLatency ? `RTC Latency: ${webRTCLatency}ms<br>` : ''}
-                    ${webRTCPeers > 0 ? '<span style="color: #00ff00;">Enhanced Mode ⚡</span>' : '<span style="color: #ffaa00;">Basic Mode</span>'}
+                    Fast Channel: ${fastStatus}<br>
+                    ${fastChannelLatency ? `Fast Latency: ${fastChannelLatency}ms<br>` : ''}
+                    <span style="color: ${modeColor};">${modeText}</span>
                 `;
             }
         }
@@ -418,30 +433,35 @@
                             }
                         }
                         
-                        // Update WebRTC status
-                        if (mainScene.webrtcManager) {
-                            const stats = mainScene.webrtcManager.getStats();
-                            const peerCount = stats.activeChannels || 0;
-                            if (peerCount > 0) {
-                                updateWebRTCStatus(`${peerCount} peers connected`, true);
+                        // Update Fast Channel status
+                        if (mainScene.fastChannelManager) {
+                            const status = mainScene.fastChannelManager.getStatus();
+                            if (status.connected) {
+                                updateWebRTCStatus('Fast Channel Connected', true);
+                            } else if (status.disabled) {
+                                updateWebRTCStatus('Fast Channel: Disabled (using WebSocket)', false);
                             } else {
-                                updateWebRTCStatus('No peers connected', false);
+                                updateWebRTCStatus(`Fast Channel: ${status.status} (${status.reconnectAttempts} attempts)`, false);
                             }
                         } else {
-                            updateWebRTCStatus('Initializing...', false);
+                            updateWebRTCStatus('Fast Channel: Initializing...', false);
                         }
                         
                         // Update network stats
                         const webSocketPing = mainScene.pingValue || 0;
-                        let webRTCPeers = 0;
-                        let webRTCLatency = null;
+                        let fastChannelStatus = 0; // 0 = disconnected, 1 = connected, -1 = disabled
+                        let fastChannelLatency = null;
                         
-                        if (mainScene.webrtcManager) {
-                            const stats = mainScene.webrtcManager.getStats();
-                            webRTCPeers = stats.activeChannels || 0;
+                        if (mainScene.fastChannelManager) {
+                            const status = mainScene.fastChannelManager.getStatus();
+                            if (status.disabled) {
+                                fastChannelStatus = -1;
+                            } else if (status.connected) {
+                                fastChannelStatus = 1;
+                            }
                         }
                         
-                        updateNetworkStats(webSocketPing, webRTCPeers, webRTCLatency);
+                        updateNetworkStats(webSocketPing, fastChannelStatus, fastChannelLatency);
                     } else {
                         // Game not ready yet
                         updateConnectionStatus('connecting', 'Loading game...');

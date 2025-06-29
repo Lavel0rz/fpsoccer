@@ -1,13 +1,15 @@
-// Example integration for hybrid WebRTC + WebSocket networking
-// This shows how to modify your existing MainScene to use both transports
+// Hybrid Fast Channel + WebSocket networking integration
+// This shows how to modify your existing MainScene to use dual connections
 
 class HybridNetworkingExample {
   
   // Modified create() method for your MainScene
   static integrateIntoMainScene(scene) {
     
-    // Add WebRTC manager to your scene
-    scene.webrtcManager = new window.WebRTCManager(scene);
+    // Add Fast Channel manager to your scene (instead of WebRTC)
+    if (window.FastChannelManager) {
+      scene.fastChannelManager = new window.FastChannelManager(scene);
+    }
     
     // Modified connectToGameServer method
     scene.connectToGameServer = function() {
@@ -17,9 +19,9 @@ class HybridNetworkingExample {
       this.socket.onopen = () => {
         console.log('WebSocket connected');
         
-        // Initialize WebRTC after WebSocket is established
-        if (this.webrtcManager) {
-          this.webrtcManager.initialize();
+        // Initialize Fast Channel after WebSocket is established
+        if (this.fastChannelManager) {
+          this.fastChannelManager.initialize();
         }
       };
       
@@ -63,9 +65,9 @@ class HybridNetworkingExample {
           timestamp: Date.now()
         };
         
-        // Use hybrid networking
-        if (this.webrtcManager) {
-          this.webrtcManager.sendMessage(input);
+        // Use hybrid networking - fast channel for input
+        if (this.fastChannelManager) {
+          this.fastChannelManager.sendMessage(input);
         } else {
           // Fallback to WebSocket
           this.socket.send(JSON.stringify(input));
@@ -73,41 +75,14 @@ class HybridNetworkingExample {
       }
     };
     
-    // Add methods to handle peer-to-peer messages
-    scene.handlePeerInput = function(fromPeer, message) {
-      // Handle input from other players for better prediction
-      console.log(`Received input from peer ${fromPeer}:`, message);
+    // Fast channel system is server-centric, so no peer-to-peer handling needed
+    // All fast messages go through the server via the fast channel
+    scene.handleFastChannelMessage = function(message) {
+      // Handle fast messages received from server
+      console.log('Received fast channel message:', message);
       
-      // You could use this for client-side prediction of other players
-      // This gives you their input slightly before the server processes it
-    };
-    
-    scene.handlePeerPosition = function(fromPeer, message) {
-      // Handle position updates from peers
-      console.log(`Received position from peer ${fromPeer}:`, message);
-      
-      // Use for smoother interpolation of other players
-      if (this.otherShips[fromPeer]) {
-        this.otherShips[fromPeer].peerPosition = {
-          x: message.x,
-          y: message.y,
-          timestamp: message.timestamp
-        };
-      }
-    };
-    
-    scene.handleBallPosition = function(fromPeer, message) {
-      // Handle ball position from peers (if using P2P ball physics)
-      console.log(`Received ball position from peer ${fromPeer}:`, message);
-      
-      // Could be used for ball prediction between server updates
-    };
-    
-    scene.handleProjectileUpdate = function(fromPeer, message) {
-      // Handle projectile updates from peers
-      console.log(`Received projectile from peer ${fromPeer}:`, message);
-      
-      // Projectiles benefit greatly from low-latency updates
+      // Fast messages are handled by the server and sent back through regular game state
+      // The benefit is in the reduced latency for sending to the server
     };
     
     // Modified team switching to use reliable WebSocket
@@ -124,14 +99,16 @@ class HybridNetworkingExample {
       }
     };
     
-    // Add periodic position broadcasting via WebRTC
+    // Add periodic position updates via Fast Channel (optional - input already contains position)
     scene.startPositionBroadcasting = function() {
       if (this.positionBroadcastInterval) {
         clearInterval(this.positionBroadcastInterval);
       }
       
+      // Note: Usually not needed since input messages already contain position
+      // But can be useful for high-frequency position-only updates
       this.positionBroadcastInterval = setInterval(() => {
-        if (this.webrtcManager && this.ship) {
+        if (this.fastChannelManager && this.ship) {
           const positionUpdate = {
             type: 'position_update',
             x: this.ship.x,
@@ -141,9 +118,9 @@ class HybridNetworkingExample {
             playerId: this.clientId
           };
           
-          this.webrtcManager.sendWebRTCMessage(positionUpdate);
+          this.fastChannelManager.sendMessage(positionUpdate);
         }
-      }, 50); // Send position updates every 50ms via WebRTC
+      }, 33); // Send position updates every 33ms (30fps) via Fast Channel
     };
     
     // Enhanced cleanup method
@@ -155,8 +132,8 @@ class HybridNetworkingExample {
         clearInterval(this.positionBroadcastInterval);
       }
       
-      if (this.webrtcManager) {
-        this.webrtcManager.cleanup();
+      if (this.fastChannelManager) {
+        this.fastChannelManager.cleanup();
       }
       
       // Call original shutdown
@@ -167,13 +144,14 @@ class HybridNetworkingExample {
     
     // Add networking stats display
     scene.updateNetworkingStats = function() {
-      if (this.webrtcManager) {
-        const stats = this.webrtcManager.getStats();
+      if (this.fastChannelManager) {
+        const stats = this.fastChannelManager.getStatus();
         
         if (this.networkStatsText) {
           this.networkStatsText.setText(
-            `WebRTC: ${stats.activeChannels}/${stats.peerCount} peers\n` +
-            `WebSocket: ${this.socket?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'}`
+            `Fast Channel: ${stats.connected ? 'Connected' : 'Disconnected'}\n` +
+            `WebSocket: ${this.socket?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'}\n` +
+            `Reconnect Attempts: ${stats.reconnectAttempts}`
           );
         } else {
           // Create stats display
