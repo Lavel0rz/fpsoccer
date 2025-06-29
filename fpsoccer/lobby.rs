@@ -463,15 +463,14 @@ pub async fn game_update_loop_for_instance(game: Arc<Mutex<Game>>) {
     let game_for_loop = game.clone();
     tokio::spawn(async move {
         println!("Game update loop started");
-        let fixed_dt = 0.2; // Increased from 0.1 to 0.2
-        let sub_steps = 3; // Reduced from 5 to 3
+        let fixed_dt = 0.1; // Match main game's update rate
+        let sub_steps = 10; // Match main game's physics steps
         let _sub_dt = fixed_dt / sub_steps as f32;
         let game_width = 2000.0;
         let game_height = 1200.0;
         
         // Counter for periodic cleanup checks
         let mut cleanup_counter = 0;
-        let mut last_update = std::time::Instant::now();
         
         loop {
             {
@@ -490,23 +489,15 @@ pub async fn game_update_loop_for_instance(game: Arc<Mutex<Game>>) {
             
             // Periodically check for empty games in the lobby manager
             cleanup_counter += 1;
-            if cleanup_counter >= 200 { // Increased from 100 to 200 (check every ~20 seconds)
+            if cleanup_counter >= 200 {
                 cleanup_counter = 0;
                 if let Ok(mut lobby) = LOBBY_MANAGER.try_lock() {
                     lobby.cleanup_empty_games();
                 }
             }
             
-            // Adaptive sleep based on actual update time
-            let elapsed = last_update.elapsed();
-            let sleep_time = if elapsed < std::time::Duration::from_millis((fixed_dt * 1000.0) as u64) {
-                std::time::Duration::from_millis((fixed_dt * 1000.0) as u64) - elapsed
-            } else {
-                std::time::Duration::from_millis(1)
-            };
-            
-            tokio::time::sleep(sleep_time).await;
-            last_update = std::time::Instant::now();
+            // Match the main game's sleep timing
+            tokio::time::sleep(tokio::time::Duration::from_millis((fixed_dt * 700.0) as u64)).await;
         }
     });
 }

@@ -137,6 +137,10 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                             
                             let mut game = game.lock().await;
                             
+                            // Debug: Print current team counts
+                            println!("Current team counts - Red: {}, Blue: {}, Yellow: {}, Green: {}", 
+                                     game.red_team_count, game.blue_team_count, game.yellow_team_count, game.green_team_count);
+                            
                             // Convert string team to enum
                             let new_team_str = team_msg.team.as_str();
                             let new_team = match new_team_str {
@@ -156,29 +160,78 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                                 None => continue, // Player not found
                             };
                             
+                            println!("Player {} wants to switch from {:?} to {:?}", player_id, current_team, new_team);
+                            
                             // Only switch if it's a different team
                             if new_team != current_team {
-                                // Update team counts first
-                                match current_team {
-                                    crate::player::Team::Red => game.red_team_count = game.red_team_count.saturating_sub(1),
-                                    crate::player::Team::Blue => game.blue_team_count = game.blue_team_count.saturating_sub(1),
-                                    crate::player::Team::Yellow => game.yellow_team_count = game.yellow_team_count.saturating_sub(1),
-                                    crate::player::Team::Green => game.green_team_count = game.green_team_count.saturating_sub(1),
+                                // Recalculate team counts to ensure they're accurate
+                                game.recalculate_team_counts();
+                                
+                                // Check if the new team can accept players
+                                let can_join = game.can_join_team(new_team);
+                                println!("Can player {} join {:?} team? {}", player_id, new_team, can_join);
+                                
+                                if !can_join {
+                                    println!("Player {} cannot switch to {:?} team - team is full", player_id, new_team);
+                                    
+                                    // Send error message to client
+                                    let error_msg = json!({
+                                        "type": "error",
+                                        "message": format!("{:?} team is full", new_team)
+                                    });
+                                    tx.lock().await.send(Message::text(error_msg.to_string())).await.unwrap();
+                                    continue;
                                 }
                                 
-                                // Update new team count
+                                // Update team counts first - subtract from current team
+                                match current_team {
+                                    crate::player::Team::Red => {
+                                        game.red_team_count = game.red_team_count.saturating_sub(1);
+                                        println!("Decremented red team count to {}", game.red_team_count);
+                                    },
+                                    crate::player::Team::Blue => {
+                                        game.blue_team_count = game.blue_team_count.saturating_sub(1);
+                                        println!("Decremented blue team count to {}", game.blue_team_count);
+                                    },
+                                    crate::player::Team::Yellow => {
+                                        game.yellow_team_count = game.yellow_team_count.saturating_sub(1);
+                                        println!("Decremented yellow team count to {}", game.yellow_team_count);
+                                    },
+                                    crate::player::Team::Green => {
+                                        game.green_team_count = game.green_team_count.saturating_sub(1);
+                                        println!("Decremented green team count to {}", game.green_team_count);
+                                    },
+                                }
+                                
+                                // Update new team count - add to new team
                                 match new_team {
-                                    crate::player::Team::Red => game.red_team_count += 1,
-                                    crate::player::Team::Blue => game.blue_team_count += 1,
-                                    crate::player::Team::Yellow => game.yellow_team_count += 1,
-                                    crate::player::Team::Green => game.green_team_count += 1,
+                                    crate::player::Team::Red => {
+                                        game.red_team_count += 1;
+                                        println!("Incremented red team count to {}", game.red_team_count);
+                                    },
+                                    crate::player::Team::Blue => {
+                                        game.blue_team_count += 1;
+                                        println!("Incremented blue team count to {}", game.blue_team_count);
+                                    },
+                                    crate::player::Team::Yellow => {
+                                        game.yellow_team_count += 1;
+                                        println!("Incremented yellow team count to {}", game.yellow_team_count);
+                                    },
+                                    crate::player::Team::Green => {
+                                        game.green_team_count += 1;
+                                        println!("Incremented green team count to {}", game.green_team_count);
+                                    },
                                 }
                                 
                                 // Now update the player's team
                                 if let Some(player) = game.players.get_mut(&player_id) {
                                     player.team = new_team;
-                                    println!("Player {} switched to {:?} team", player_id, new_team);
+                                    println!("Player {} successfully switched to {:?} team", player_id, new_team);
+                                    println!("Updated team counts - Red: {}, Blue: {}, Yellow: {}, Green: {}", 
+                                             game.red_team_count, game.blue_team_count, game.yellow_team_count, game.green_team_count);
                                 }
+                            } else {
+                                println!("Player {} is already on {:?} team, no switch needed", player_id, current_team);
                             }
                             
                             continue;
@@ -216,10 +269,16 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                     }
                     
                     // Otherwise, parse as regular input.
-                    match serde_json::from_str::<InputMessage>(txt) {
+                                            match serde_json::from_str::<InputMessage>(txt) {
                         Ok(input_msg) => {
                             let mut game_lock = game.lock().await;
                             if let Some(player) = game_lock.players.get_mut(&player_id) {
+                                // Debug: Log input processing
+                                if input_msg.left || input_msg.right || input_msg.up || input_msg.down {
+                                    println!("Server received movement input from player {}: left={}, right={}, up={}, down={}, seq={}", 
+                                             player_id, input_msg.left, input_msg.right, input_msg.up, input_msg.down, input_msg.seq);
+                                }
+                                
                                 player.input.left = input_msg.left;
                                 player.input.right = input_msg.right;
                                 player.input.up = input_msg.up;
@@ -236,7 +295,7 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                                     if boost {
                                         println!("Player {} is firing a projectile. Current cooldown: {}", player_id, player.rocket_cooldown);
                                     } else {
-                                        println!("Player {} released boost button", player_id);
+                                        // println!("Player {} released boost button", player_id); // Commented out to reduce spam
                                     }
                                     player.input.boost = boost;
                                 }
@@ -250,6 +309,9 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
                                 
                                 if input_msg.seq > player.last_seq {
                                     player.last_seq = input_msg.seq;
+                                } else {
+                                    println!("Server REJECTED input from player {}: received seq {} <= last_seq {}", 
+                                             player_id, input_msg.seq, player.last_seq);
                                 }
                             }
                         },
@@ -278,7 +340,22 @@ pub async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
     
     let mut game_lock = game.lock().await;
     game_lock.clients.remove(&player_id);
-    game_lock.players.remove(&player_id);
+    
+    // Remove player and update team counts
+    if let Some(player) = game_lock.players.remove(&player_id) {
+        // Decrement team count for the player's team
+        match player.team {
+            crate::player::Team::Red => game_lock.red_team_count = game_lock.red_team_count.saturating_sub(1),
+            crate::player::Team::Blue => game_lock.blue_team_count = game_lock.blue_team_count.saturating_sub(1),
+            crate::player::Team::Yellow => game_lock.yellow_team_count = game_lock.yellow_team_count.saturating_sub(1),
+            crate::player::Team::Green => game_lock.green_team_count = game_lock.green_team_count.saturating_sub(1),
+        }
+        println!("Player {} (team: {:?}) disconnected", player_id, player.team);
+    }
+    
+    // Recalculate team counts to ensure they're accurate
+    game_lock.recalculate_team_counts();
+    
     println!("Player {} disconnected. Game now has {} players (Red: {}, Blue: {}, Yellow: {}, Green: {})", 
              player_id, 
              game_lock.players.len(),

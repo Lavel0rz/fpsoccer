@@ -88,6 +88,8 @@ pub struct GameStateSnapshot {
     projectiles: Vec<Projectile>, // Add projectiles to the game state
     team1_score: u32, // Red team score
     team2_score: u32, // Blue team score
+    team3_score: u32, // Yellow team score
+    team4_score: u32, // Green team score
 }
 
 pub struct Game {
@@ -97,6 +99,8 @@ pub struct Game {
     pub next_id: u32,
     pub team1_score: u32, // Red team score
     pub team2_score: u32, // Blue team score
+    pub team3_score: u32, // Yellow team score  
+    pub team4_score: u32, // Green team score
     pub goal_cooldown: f32, // Add cooldown after a goal is scored
     pub red_team_count: u32, // Count of players in red team
     pub blue_team_count: u32, // Count of players in blue team
@@ -126,12 +130,16 @@ impl Game {
                 owner: None,
                 last_shooter: None,
                 shot_clock: 10.0, // Initialize shot clock
+                pickup_cooldown: 0.0, // Initialize pickup cooldown
+                exclusive_team: None, // No team restriction initially
             },
             players: HashMap::new(),
             clients: HashMap::new(),
             next_id: 1,
             team1_score: 0,
             team2_score: 0,
+            team3_score: 0,
+            team4_score: 0,
             goal_cooldown: 0.0,
             red_team_count: 0,
             blue_team_count: 0,
@@ -144,6 +152,9 @@ impl Game {
     
     // Add a method to determine which team a new player should join
     pub fn assign_team(&mut self) -> Team {
+        // For corner defense mode: limit to 1 player per team
+        let max_players_per_team = 1;
+        
         let team_counts = [
             (Team::Red, self.red_team_count),
             (Team::Blue, self.blue_team_count),
@@ -151,8 +162,19 @@ impl Game {
             (Team::Green, self.green_team_count),
         ];
         
-        // Find team with lowest count
-        let (team, _) = team_counts.iter()
+        // Find team with lowest count that hasn't reached the limit
+        let available_teams: Vec<_> = team_counts.iter()
+            .filter(|(_, count)| *count < max_players_per_team)
+            .collect();
+        
+        if available_teams.is_empty() {
+            // All teams are full, assign to Red as fallback (should not happen in corner defense)
+            println!("Warning: All teams are full, assigning to Red team");
+            return Team::Red;
+        }
+        
+        // Find team with lowest count among available teams
+        let (team, _) = available_teams.iter()
             .min_by_key(|(_, count)| *count)
             .map(|(team, _)| (*team, 0u32))
             .unwrap_or((Team::Red, 0u32));
@@ -166,6 +188,59 @@ impl Game {
         }
         
         team
+    }
+    
+    // Add method to check if a team can accept new players
+    pub fn can_join_team(&self, team: Team) -> bool {
+        let max_players_per_team = 1; // For corner defense mode
+        
+        let current_count = match team {
+            Team::Red => self.red_team_count,
+            Team::Blue => self.blue_team_count,
+            Team::Yellow => self.yellow_team_count,
+            Team::Green => self.green_team_count,
+        };
+        
+        let can_join = current_count < max_players_per_team;
+        
+        println!("can_join_team check: {:?} team has {} players (max: {}), can join: {}", 
+                 team, current_count, max_players_per_team, can_join);
+        
+        // Also count actual players in this team for verification
+        let actual_count = self.players.values()
+            .filter(|player| player.team == team)
+            .count();
+        
+        println!("Verification: {:?} team actually has {} players in game", team, actual_count);
+        
+        if current_count as usize != actual_count {
+            println!("WARNING: Team count mismatch! Stored count: {}, Actual count: {}", 
+                     current_count, actual_count);
+        }
+        
+        can_join
+    }
+    
+    // Add method to recalculate team counts from actual players (to fix any sync issues)
+    pub fn recalculate_team_counts(&mut self) {
+        // Reset all counts
+        self.red_team_count = 0;
+        self.blue_team_count = 0;
+        self.yellow_team_count = 0;
+        self.green_team_count = 0;
+        
+        // Count players by team
+        for (_, player) in &self.players {
+            match player.team {
+                Team::Red => self.red_team_count += 1,
+                Team::Blue => self.blue_team_count += 1,
+                Team::Yellow => self.yellow_team_count += 1,
+                Team::Green => self.green_team_count += 1,
+            }
+        }
+        
+        println!("Recalculated team counts - Red: {}, Blue: {}, Yellow: {}, Green: {}", 
+                 self.red_team_count, self.blue_team_count, self.yellow_team_count, self.green_team_count);
     }
     
     // Update player removal to account for team counts
@@ -188,6 +263,19 @@ impl Game {
         if self.goal_cooldown > 0.0 {
             self.goal_cooldown -= fixed_dt;
             if self.goal_cooldown < 0.0 { self.goal_cooldown = 0.0; }
+        }
+        
+        // Update ball pickup cooldown
+        if self.ball.pickup_cooldown > 0.0 {
+            self.ball.pickup_cooldown -= fixed_dt;
+            if self.ball.pickup_cooldown < 0.0 { 
+                self.ball.pickup_cooldown = 0.0;
+                if let Some(ref team) = self.ball.exclusive_team {
+                    println!("Ball glow ended - now only {} team can grab it", team);
+                }
+                // Keep team restriction active even after cooldown expires
+                // It will only be cleared when the ball is grabbed by the exclusive team
+            }
         }
         
         // Update player cooldowns
@@ -731,6 +819,23 @@ impl Game {
                         continue;
                     }
                     
+                    // Check if ball is in pickup cooldown
+                    if self.ball.pickup_cooldown > 0.0 {
+                        continue; // No one can pick up the ball during cooldown (reduced logging)
+                    }
+                    
+                    // Check if ball has team restriction
+                    if let Some(ref exclusive_team) = self.ball.exclusive_team {
+                        let player_team_str = format!("{:?}", player.team);
+                        if player_team_str != *exclusive_team {
+                            // Only log when someone tries to grab but can't (reduced spam)
+                            continue; // Only the exclusive team can pick up the ball
+                        } else {
+                            println!("Player {} ({} team) can grab ball (exclusive access)", 
+                                player.id, player_team_str);
+                        }
+                    }
+                    
                     let dx = player.ship.x - self.ball.x;
                     let dy = player.ship.y - self.ball.y;
                     let dist2 = dx * dx + dy * dy;
@@ -757,8 +862,14 @@ impl Game {
                 }
                 
                 if let Some(player_id) = closest_id {
-                    println!("Ball grabbed during physics sub-step!");
+                    if let Some(player) = self.players.get(&player_id) {
+                        println!("Ball grabbed by player {} ({:?} team)", player_id, player.team);
+                    }
                     self.ball.grab(player_id, new_x, new_y);
+                    
+                    // Clear exclusive team restriction when ball is successfully grabbed (this will reset ball color on client)
+                    self.ball.exclusive_team = None;
+                    
                     break; // Exit the sub-step loop early since the ball is now grabbed
                 }
             }
@@ -930,6 +1041,8 @@ impl Game {
             projectiles: self.projectiles.clone(),
             team1_score: self.team1_score,
             team2_score: self.team2_score,
+            team3_score: self.team3_score,
+            team4_score: self.team4_score,
         });
         let snapshot_str = snapshot.to_string();
         for (_id, sender) in self.clients.iter_mut() {
@@ -949,6 +1062,9 @@ impl Game {
         let ball_top = self.ball.y - BALL_HEIGHT / 2.0;
         let ball_bottom = self.ball.y + BALL_HEIGHT / 2.0;
         
+        // Debug: Log ball bounds (commented out to reduce spam)
+        // println!("Ball bounds: left={:.1}, right={:.1}, top={:.1}, bottom={:.1}", ball_left, ball_right, ball_top, ball_bottom);
+        
         // Determine the middle Y position to distinguish north from south goals
         let mut min_y = f32::INFINITY;
         let mut max_y = f32::NEG_INFINITY;
@@ -956,7 +1072,7 @@ impl Game {
         let mut max_x = f32::NEG_INFINITY;
         
         // Find the min and max coordinates of all goals
-        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
+        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type.starts_with("goal_")) {
             min_y = min_y.min(goal.y);
             max_y = max_y.max(goal.y + goal.height);
             min_x = min_x.min(goal.x);
@@ -967,62 +1083,94 @@ impl Game {
         let middle_y = (min_y + max_y) / 2.0;
         let middle_x = (min_x + max_x) / 2.0;
         
-        println!("Ball position: ({}, {})", self.ball.x, self.ball.y);
-        println!("Goal Y range: {} to {}, middle: {}", min_y, max_y, middle_y);
+        // println!("Ball position: ({}, {})", self.ball.x, self.ball.y);
+        // println!("Goal Y range: {} to {}, middle: {}", min_y, max_y, middle_y);
         
         // Check if ball is in a goal area
-        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
-            // Debug log goal position
-            println!("Checking goal at ({}, {}), size: {}x{}", goal.x, goal.y, goal.width, goal.height);
-            
-            if ball_right > goal.x && ball_left < goal.x + goal.width &&
-               ball_bottom > goal.y && ball_top < goal.y + goal.height {
-                
-                println!("Ball entered goal at ({}, {})", goal.x, goal.y);
-                
-                // Determine which team scored based on goal position
-                // North goals (y < middle_y) are Red team's goals, South goals are Blue team's goals
-                if goal.y < middle_y {
-                    // Ball in north (Red) goal - Blue team scores
-                    self.team2_score += 1;
-                    println!("Blue team scored! Score: Red {} - Blue {}", self.team1_score, self.team2_score);
-                } else {
-                    // Ball in south (Blue) goal - Red team scores
-                    self.team1_score += 1;
-                    println!("Red team scored! Score: Red {} - Blue {}", self.team1_score, self.team2_score);
-                }
-                
-                // Reset ball position to exact middle between goals
-                self.ball.x = middle_x;
-                self.ball.y = middle_y;
-                self.ball.vx = 0.0;
-                self.ball.vy = 0.0;
-                self.ball.grabbed = false;
-                self.ball.owner = None;
-                self.ball.last_shooter = None;
-                
-                // Set cooldown to prevent immediate scoring after reset
-                self.goal_cooldown = 2.0;
-                
-                // Send a goal event to all clients
-                let goal_event = json!({
-                    "type": "goal",
-                    "team1_score": self.team1_score,
-                    "team2_score": self.team2_score,
-                    "scorer_team": if goal.y < middle_y { "blue" } else { "red" }
-                });
-                
-                let goal_str = goal_event.to_string();
-                for (_id, sender) in self.clients.iter_mut() {
-                    let msg = goal_str.clone();
-                    let sender = Arc::clone(sender);
-                    tokio::spawn(async move {
-                        let _ = sender.lock().await.send(Message::text(msg)).await;
+        if self.goal_cooldown <= 0.0 {
+            for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type.starts_with("goal_")) {
+                // Add debug print for each goal (commented out to reduce spam)
+                // println!("Checking goal: type={}, x={}, y={}, w={}, h={}", goal.obj_type, goal.x, goal.y, goal.width, goal.height);
+                // Add a small margin to the collision check
+                let margin = 1.0;
+                if ball_right >= goal.x - margin && ball_left <= goal.x + goal.width + margin &&
+                   ball_bottom >= goal.y - margin && ball_top <= goal.y + goal.height + margin {
+                    println!("GOAL SCORED! Ball hit {} goal", goal.obj_type);
+                    
+                    // Determine which team was scored on based on the goal type
+                    let scored_on_team = match goal.obj_type.as_str() {
+                        "goal_red" => Team::Red,      // Red goal hit = Red team scored on
+                        "goal_blue" => Team::Blue,    // Blue goal hit = Blue team scored on  
+                        "goal_yellow" => Team::Yellow, // Yellow goal hit = Yellow team scored on
+                        "goal_green" => Team::Green,  // Green goal hit = Green team scored on
+                        _ => continue, // Skip if not a valid goal type
+                    };
+                    
+                    // Get the player who scored (last shooter)
+                    let scorer_name = if let Some(shooter_id) = self.ball.last_shooter {
+                        if let Some(player) = self.players.get(&shooter_id) {
+                            player.display_name.clone()
+                        } else {
+                            "Unknown Player".to_string()
+                        }
+                    } else {
+                        "Unknown Player".to_string()
+                    };
+                    
+                    // Update scores based on which team was scored on (they lose a point in this context, but we track goals scored against them)
+                    // In corner defense, when your goal is hit, the other teams get points
+                    // For simplicity, we'll just increment a general score counter
+                    match scored_on_team {
+                        Team::Red => self.team1_score += 1,      // Point scored against red
+                        Team::Blue => self.team2_score += 1,     // Point scored against blue
+                        Team::Yellow => self.team3_score += 1,   // Point scored against yellow
+                        Team::Green => self.team4_score += 1,    // Point scored against green
+                    }
+                    
+                    // Reset ball position and state
+                    self.ball.x = middle_x;
+                    self.ball.y = middle_y;
+                    self.ball.vx = 0.0;
+                    self.ball.vy = 0.0;
+                    self.ball.grabbed = false;
+                    self.ball.owner = None;
+                    self.ball.grab_cooldown = 0.5;
+                    self.goal_cooldown = 2.0;
+                    
+                    // Set pickup cooldown and team restriction
+                    self.ball.pickup_cooldown = 3.0; // 3 second cooldown
+                    self.ball.exclusive_team = Some(format!("{:?}", scored_on_team)); // Team that was scored on gets exclusive pickup
+                    
+                    println!("Ball glowing for 3s, then exclusive to {:?} team", scored_on_team);
+                    
+                    // Send goal event to all clients
+                    let goal_event = json!({
+                        "type": "goal",
+                        "scored_on_team": format!("{:?}", scored_on_team),
+                        "scorer_name": scorer_name,
+                        "team1_score": self.team1_score,
+                        "team2_score": self.team2_score,
+                        "team3_score": self.team3_score,
+                        "team4_score": self.team4_score,
+                        "ball_exclusive_team": format!("{:?}", scored_on_team)
                     });
+                    
+                    let goal_str = goal_event.to_string();
+                    println!("Sending goal message to {} clients: {}", self.clients.len(), goal_str);
+                    for (client_id, sender) in self.clients.iter_mut() {
+                        let msg = goal_str.clone();
+                        let sender = Arc::clone(sender);
+                        let client_id = *client_id;
+                        tokio::spawn(async move {
+                            match sender.lock().await.send(Message::text(msg.clone())).await {
+                                Ok(_) => println!("Goal message sent to client {}", client_id),
+                                Err(e) => println!("Failed to send goal message to client {}: {:?}", client_id, e),
+                            }
+                        });
+                    }
+                    
+                    break;
                 }
-                
-                // Only count one goal at a time
-                break;
             }
         }
     }
@@ -1048,6 +1196,8 @@ impl Game {
             projectiles: self.projectiles.clone(),
             team1_score: self.team1_score,
             team2_score: self.team2_score,
+            team3_score: self.team3_score,
+            team4_score: self.team4_score,
         }
     }
     
@@ -1056,6 +1206,8 @@ impl Game {
         // Reset scores
         self.team1_score = 0;
         self.team2_score = 0;
+        self.team3_score = 0;
+        self.team4_score = 0;
         
         // Find the min and max coordinates of all goals to determine the middle point
         // This reuses the same logic as in check_goal_collision
@@ -1065,7 +1217,7 @@ impl Game {
         let mut max_x = f32::NEG_INFINITY;
         
         // Find the min and max coordinates of all goals
-        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
+        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type.starts_with("goal")) {
             min_y = min_y.min(goal.y);
             max_y = max_y.max(goal.y + goal.height);
             min_x = min_x.min(goal.x);
@@ -1076,6 +1228,9 @@ impl Game {
         let middle_x = (min_x + max_x) / 2.0;
         let middle_y = (min_y + max_y) / 2.0;
         
+        println!("RESET: Goal bounds - min_x: {}, max_x: {}, min_y: {}, max_y: {}", min_x, max_x, min_y, max_y);
+        println!("RESET: Calculated middle position: ({}, {})", middle_x, middle_y);
+        
         // Reset ball position to the middle between goals
         self.ball.x = middle_x;
         self.ball.y = middle_y;
@@ -1085,6 +1240,8 @@ impl Game {
         self.ball.owner = None;
         self.ball.last_shooter = None;
         self.ball.shot_clock = 10.0;
+        self.ball.pickup_cooldown = 0.0;
+        self.ball.exclusive_team = None;
         
         // Reset player positions based on team - closer to the ball
         for (_, player) in self.players.iter_mut() {
@@ -1112,6 +1269,9 @@ impl Game {
             }
             // Reset player velocity
             player.velocity = (0.0, 0.0);
+            
+            // BUGFIX: Reset sequence number to allow input after reset
+            player.last_seq = 0;
         }
         
         // Set goal cooldown to prevent immediate scoring
@@ -1121,7 +1281,9 @@ impl Game {
         let reset_event = serde_json::json!({
             "type": "game_reset",
             "team1_score": self.team1_score,
-            "team2_score": self.team2_score
+            "team2_score": self.team2_score,
+            "team3_score": self.team3_score,
+            "team4_score": self.team4_score
         });
         
         let reset_str = reset_event.to_string();
@@ -1364,7 +1526,7 @@ pub async fn game_update_loop() {
 
 // Load the map_data.json file at compile time.
 pub static MAP_OBJECTS: Lazy<Vec<MapObject>> = Lazy::new(|| {
-    let json_str = include_str!("../map_data.json");
+    let json_str = include_str!("../cornerdefense.json");
     serde_json::from_str(json_str).expect("Failed to parse map_data.json")
 });
 

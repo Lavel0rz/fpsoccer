@@ -14,6 +14,8 @@ pub struct Ball {
     pub owner: Option<u32>,
     pub last_shooter: Option<u32>,
     pub shot_clock: f32,
+    pub pickup_cooldown: f32, // Time before ball can be picked up after goal
+    pub exclusive_team: Option<String>, // Team that can exclusively pick up the ball (after goal)
 }
 
 impl Ball {
