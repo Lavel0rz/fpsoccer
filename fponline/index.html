@@ -1,95 +1,522 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Multiplayer Game</title>
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      background-color: #121212;
-      color: #ffffff;
-      font-family: Arial, sans-serif;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
-      width: 100vw;
-      overflow-x: hidden;
-    }
-    
-    h1 {
-      font-size: 2.5em;
-      margin-bottom: 20px;
-      color: #4caf50;
-      text-align: center;
-    }
-    
-    .buttons {
-      display: flex;
-      gap: 20px;
-      justify-content: center;
-      width: 100%;
-    }
-    
-    button {
-      background-color: #4caf50;
-      color: white;
-      border: none;
-      padding: 15px 30px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 1.2em;
-      transition: background-color 0.3s;
-    }
-    
-    button:hover {
-      background-color: #3e8e41;
-    }
-    
-    #loading-message {
-      margin-top: 20px;
-      font-size: 1.2em;
-      color: #4caf50;
-      display: none;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FP Royale - Enhanced with WebRTC</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            font-family: Arial, sans-serif;
+            overflow: hidden;
+        }
+        
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        .ui-overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            color: white;
+            font-size: 14px;
+        }
+        
+        .team-controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+        }
+        
+        .team-button {
+            margin: 2px;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        
+        .team-red { background-color: #ff0000; color: white; }
+        .team-blue { background-color: #0078ff; color: white; }
+        .team-yellow { background-color: #ffdc00; color: black; }
+        .team-green { background-color: #00c800; color: white; }
+        
+        #reset-game {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            padding: 10px 15px;
+            background-color: #ff6600;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            z-index: 1000;
+            display: none;
+        }
+        
+        #reset-game:hover {
+            background-color: #e55a00;
+        }
+        
+        /* Connection status indicator */
+        .connection-status {
+            position: absolute;
+            top: 50px;
+            left: 10px;
+            z-index: 1000;
+            color: white;
+            font-size: 12px;
+            background: rgba(0,0,0,0.7);
+            padding: 5px 10px;
+            border-radius: 5px;
+        }
+        
+        .connection-status.connected { color: #00ff00; }
+        .connection-status.connecting { color: #ffff00; }
+        .connection-status.disconnected { color: #ff0000; }
+        
+        /* WebRTC status indicator */
+        .webrtc-status {
+            position: absolute;
+            top: 80px;
+            left: 10px;
+            z-index: 1000;
+            color: white;
+            font-size: 12px;
+            background: rgba(0,0,0,0.7);
+            padding: 5px 10px;
+            border-radius: 5px;
+        }
+        
+        /* Network performance display */
+        .network-stats {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            z-index: 1000;
+            color: white;
+            font-size: 11px;
+            background: rgba(0,0,0,0.5);
+            padding: 5px;
+            border-radius: 3px;
+            max-width: 200px;
+        }
+        
+        /* Mobile fullscreen button */
+        .fullscreen-btn {
+            position: absolute;
+            bottom: 50px;
+            right: 10px;
+            padding: 10px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            z-index: 1000;
+            display: none;
+        }
+        
+        @media (max-width: 768px) {
+            .fullscreen-btn {
+                display: block;
+            }
+        }
+    </style>
 </head>
 <body>
-  <h1>Multiplayer Game</h1>
-  <div class="buttons" id="button-container">
-    <button id="lobby-button" onclick="window.location.href='lobby.html'">Enter Lobby</button>
-    <button id="quick-play-button" onclick="window.location.href='game.html'">Quick Play</button>
-  </div>
-  <div id="loading-message">Loading game...</div>
-  
-  <script>
-    console.log('Index page loaded');
+    <div id="game-container">
+        <!-- Connection status indicators -->
+        <div id="connection-status" class="connection-status connecting">
+            Connecting to server...
+        </div>
+        
+        <div id="webrtc-status" class="webrtc-status">
+            WebRTC: Initializing...
+        </div>
+        
+        <!-- Network performance stats -->
+        <div id="network-stats" class="network-stats">
+            Network Stats Loading...
+        </div>
+        
+        <!-- Team switching controls -->
+        <div class="team-controls">
+            <button class="team-button team-red" onclick="switchToTeam('Red')">Red Team</button>
+            <button class="team-button team-blue" onclick="switchToTeam('Blue')">Blue Team</button>
+            <button class="team-button team-yellow" onclick="switchToTeam('Yellow')">Yellow Team</button>
+            <button class="team-button team-green" onclick="switchToTeam('Green')">Green Team</button>
+        </div>
+        
+        <!-- Host controls -->
+        <button id="reset-game" onclick="resetGame()">Reset Game</button>
+        
+        <!-- Mobile fullscreen -->
+        <button class="fullscreen-btn" onclick="toggleFullscreen()">📱 Fullscreen</button>
+    </div>
+
+    <!-- Game Configuration -->
+    <script>
+        // WebSocket configuration - Using your DigitalOcean domain
+        window.WEBSOCKET_URL = 'wss://towerup.io/ws';
+        
+        // Player configuration
+        window.PLAYER_DISPLAY_NAME = 'Player_' + Math.floor(Math.random() * 1000);
+        
+        // WebRTC configuration
+        window.WEBRTC_CONFIG = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+                // Add TURN servers for production:
+                // { 
+                //   urls: 'turn:your-turn-server.com:3478',
+                //   username: 'user',
+                //   credential: 'pass'
+                // }
+            ]
+        };
+        
+        // Performance monitoring
+        window.ENABLE_NETWORK_STATS = true;
+        window.ENABLE_WEBRTC_FALLBACK = true;
+        
+        // Team switching and game functions will be defined below after game loads
+    </script>
+
+    <!-- Phaser 3 Framework -->
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/phaser3-rex-plugins@1.1.79/dist/rexvirtualjoystickplugin.min.js"></script>
     
-    // Check if we're on itch.io or another hosting platform
-    function isOnItchIo() {
-      return window.location.hostname.includes('itch.io') || 
-             window.location.hostname.includes('itchio') ||
-             window.location.hostname.includes('hwcdn.net');
-    }
+    <!-- WebRTC Networking (Load before main game) -->
+    <script src="networking/webrtc-manager.js"></script>
+    <script src="networking/hybrid-networking-integration.js"></script>
     
-    // Function to redirect to lobby after a short delay
-    function redirectToLobby() {
-      document.getElementById('button-container').style.display = 'none';
-      document.getElementById('loading-message').style.display = 'block';
-      
-      console.log('Redirecting to lobby.html...');
-      setTimeout(function() {
-        window.location.href = 'lobby.html';
-      }, 1500);
-    }
-    
-    // If we're on itch.io, automatically redirect to the lobby
-    if (isOnItchIo()) {
-      console.log('Detected itch.io hosting environment');
-      redirectToLobby();
-    }
-  </script>
+    <!-- Main Game Script -->
+    <script src="main.js"></script>
+
+    <!-- UI Helper Functions -->
+    <script>
+        // Global references
+        let gameInstance = null;
+        
+        // Team switching function - exactly like original game
+        function switchToTeam(team) {
+            console.log(`Switching to ${team} team`);
+            
+            // Wait for game to be ready if it's not yet
+            if (!window.gameInstance) {
+                console.log('Game not ready yet, waiting...');
+                setTimeout(() => switchToTeam(team), 500);
+                return;
+            }
+            
+            try {
+                let mainScene = null;
+                
+                // Try multiple ways to find the main scene
+                if (window.gameInstance.scene) {
+                    // Method 1: Check if scenes array exists
+                    if (window.gameInstance.scene.scenes && window.gameInstance.scene.scenes.length > 0) {
+                        mainScene = window.gameInstance.scene.scenes[0];
+                        console.log('Found scene via scenes array');
+                    }
+                    // Method 2: Check if it's directly accessible
+                    else if (window.gameInstance.scene.getScene) {
+                        mainScene = window.gameInstance.scene.getScene('MainScene');
+                        console.log('Found scene via getScene');
+                    }
+                    // Method 3: Check if scene manager has active scene
+                    else if (window.gameInstance.scene.manager && window.gameInstance.scene.manager.scenes) {
+                        mainScene = window.gameInstance.scene.manager.scenes[0];
+                        console.log('Found scene via scene manager');
+                    }
+                    // Method 4: Check if the scene itself is the MainScene
+                    else if (window.gameInstance.scene.switchTeam) {
+                        mainScene = window.gameInstance.scene;
+                        console.log('Scene is directly accessible');
+                    }
+                }
+                
+                if (mainScene) {
+                    // Use the exact same method as original game
+                    if (mainScene.switchTeam) {
+                        mainScene.switchTeam(team);
+                        console.log(`Successfully called switchTeam method for ${team}`);
+                        return;
+                    }
+                    
+                    // Fallback: direct socket communication
+                    if (mainScene.socket && mainScene.socket.readyState === WebSocket.OPEN) {
+                        console.log(`Using direct socket for team switch to ${team}`);
+                        const message = {
+                            type: 'switch_team',
+                            team: team
+                        };
+                        mainScene.socket.send(JSON.stringify(message));
+                        
+                        // Force update team display locally
+                        if (mainScene.updateTeamDisplay) {
+                            mainScene.updateTeamDisplay(team);
+                        }
+                        
+                        // Update ship color immediately for visual feedback
+                        if (mainScene.ship) {
+                            const teamColors = {
+                                'Red': 0xff0000,
+                                'Blue': 0x0000ff, 
+                                'Yellow': 0xffdc00,
+                                'Green': 0x00c800
+                            };
+                            if (teamColors[team]) {
+                                mainScene.ship.setTint(teamColors[team]);
+                                console.log(`Updated ship color to ${team}`);
+                            }
+                        }
+                        return;
+                    }
+                }
+                
+                console.error('No team switching method available - debugging scene structure');
+                console.log('Detailed game state:', {
+                    hasGameInstance: !!window.gameInstance,
+                    hasScene: !!(window.gameInstance && window.gameInstance.scene),
+                    sceneType: window.gameInstance && window.gameInstance.scene ? typeof window.gameInstance.scene : 'none',
+                    sceneKeys: window.gameInstance && window.gameInstance.scene ? Object.keys(window.gameInstance.scene) : [],
+                    hasScenes: !!(window.gameInstance && window.gameInstance.scene && window.gameInstance.scene.scenes),
+                    sceneCount: window.gameInstance && window.gameInstance.scene && window.gameInstance.scene.scenes ? window.gameInstance.scene.scenes.length : 0,
+                    hasManager: !!(window.gameInstance && window.gameInstance.scene && window.gameInstance.scene.manager),
+                    managerScenes: window.gameInstance && window.gameInstance.scene && window.gameInstance.scene.manager && window.gameInstance.scene.manager.scenes ? window.gameInstance.scene.manager.scenes.length : 0
+                });
+                
+            } catch (error) {
+                console.error('Error switching teams:', error);
+            }
+        }
+        
+        // Game reset function with better error handling
+        function resetGame() {
+            console.log('Resetting game');
+            
+            // Wait for game to be ready if it's not yet
+            if (!window.gameInstance) {
+                console.log('Game not ready yet, waiting...');
+                setTimeout(() => resetGame(), 500);
+                return;
+            }
+            
+            // Check if game scene is available
+            if (window.gameInstance.scene && window.gameInstance.scene.scenes && window.gameInstance.scene.scenes.length > 0) {
+                const mainScene = window.gameInstance.scene.scenes[0];
+                if (mainScene && mainScene.resetGame) {
+                    mainScene.resetGame();
+                    console.log('Successfully reset game');
+                    return;
+                }
+            }
+            
+            // Fallback - try the old way
+            if (window.gameInstance.resetGame) {
+                window.gameInstance.resetGame();
+                console.log('Successfully reset game (fallback)');
+            } else {
+                console.error('No game reset method available');
+            }
+        }
+        
+        // Fullscreen toggle for mobile
+        function toggleFullscreen() {
+            if (gameInstance && gameInstance.scale) {
+                if (gameInstance.scale.isFullscreen) {
+                    gameInstance.scale.stopFullscreen();
+                } else {
+                    gameInstance.scale.startFullscreen();
+                }
+            }
+        }
+        
+        // Update connection status
+        function updateConnectionStatus(status, message) {
+            const statusElement = document.getElementById('connection-status');
+            if (statusElement) {
+                statusElement.textContent = message;
+                statusElement.className = `connection-status ${status}`;
+            }
+        }
+        
+        // Update WebRTC status
+        function updateWebRTCStatus(message, isConnected = false) {
+            const statusElement = document.getElementById('webrtc-status');
+            if (statusElement) {
+                statusElement.textContent = `WebRTC: ${message}`;
+                statusElement.style.color = isConnected ? '#00ff00' : '#ffff00';
+            }
+        }
+        
+        // Update network stats with better formatting
+        function updateNetworkStats(webSocketPing, webRTCPeers, webRTCLatency) {
+            if (!window.ENABLE_NETWORK_STATS) return;
+            
+            const statsElement = document.getElementById('network-stats');
+            if (statsElement) {
+                const wsStatus = webSocketPing > 0 ? `${webSocketPing}ms` : 'Not connected';
+                const rtcStatus = webRTCPeers > 0 ? `${webRTCPeers} peers` : 'No peers';
+                
+                statsElement.innerHTML = `
+                    <strong>Network Status:</strong><br>
+                    WebSocket: ${wsStatus}<br>
+                    WebRTC: ${rtcStatus}<br>
+                    ${webRTCLatency ? `RTC Latency: ${webRTCLatency}ms<br>` : ''}
+                    ${webRTCPeers > 0 ? '<span style="color: #00ff00;">Enhanced Mode ⚡</span>' : '<span style="color: #ffaa00;">Basic Mode</span>'}
+                `;
+            }
+        }
+        
+        // Initialize performance monitoring with proper scene finding
+        function initializePerformanceMonitoring() {
+            if (!window.ENABLE_NETWORK_STATS) return;
+            
+            setInterval(() => {
+                try {
+                    if (!window.gameInstance) return;
+                    
+                    let mainScene = null;
+                    
+                    // Use the same scene-finding logic as team switching
+                    if (window.gameInstance.scene) {
+                        if (window.gameInstance.scene.scenes && window.gameInstance.scene.scenes.length > 0) {
+                            mainScene = window.gameInstance.scene.scenes[0];
+                        } else if (window.gameInstance.scene.getScene) {
+                            mainScene = window.gameInstance.scene.getScene('MainScene');
+                        } else if (window.gameInstance.scene.manager && window.gameInstance.scene.manager.scenes) {
+                            mainScene = window.gameInstance.scene.manager.scenes[0];
+                        } else if (window.gameInstance.scene.switchTeam) {
+                            mainScene = window.gameInstance.scene;
+                        }
+                    }
+                    
+                    if (mainScene) {
+                        // Update connection status based on socket state
+                        if (mainScene.socket) {
+                            const socketState = mainScene.socket.readyState;
+                            if (socketState === WebSocket.OPEN) {
+                                updateConnectionStatus('connected', 'Connected to server');
+                            } else if (socketState === WebSocket.CONNECTING) {
+                                updateConnectionStatus('connecting', 'Connecting to server...');
+                            } else {
+                                updateConnectionStatus('disconnected', 'Disconnected from server');
+                            }
+                        }
+                        
+                        // Update WebRTC status
+                        if (mainScene.webrtcManager) {
+                            const stats = mainScene.webrtcManager.getStats();
+                            const peerCount = stats.activeChannels || 0;
+                            if (peerCount > 0) {
+                                updateWebRTCStatus(`${peerCount} peers connected`, true);
+                            } else {
+                                updateWebRTCStatus('No peers connected', false);
+                            }
+                        } else {
+                            updateWebRTCStatus('Initializing...', false);
+                        }
+                        
+                        // Update network stats
+                        const webSocketPing = mainScene.pingValue || 0;
+                        let webRTCPeers = 0;
+                        let webRTCLatency = null;
+                        
+                        if (mainScene.webrtcManager) {
+                            const stats = mainScene.webrtcManager.getStats();
+                            webRTCPeers = stats.activeChannels || 0;
+                        }
+                        
+                        updateNetworkStats(webSocketPing, webRTCPeers, webRTCLatency);
+                    } else {
+                        // Game not ready yet
+                        updateConnectionStatus('connecting', 'Loading game...');
+                        updateWebRTCStatus('Waiting for game...', false);
+                        updateNetworkStats(0, 0, null);
+                    }
+                } catch (error) {
+                    console.debug('Performance monitoring error:', error);
+                    updateConnectionStatus('disconnected', 'Connection error');
+                    updateWebRTCStatus('Error', false);
+                }
+            }, 1000);
+        }
+        
+        // Wait for game to load, then initialize monitoring
+        window.addEventListener('load', () => {
+            // Show initial status immediately
+            updateConnectionStatus('connecting', 'Loading game...');
+            updateWebRTCStatus('Waiting for game...', false);
+            updateNetworkStats(0, 0, null);
+            
+            // Wait for the game to initialize, then start monitoring
+            setTimeout(() => {
+                initializePerformanceMonitoring();
+                console.log('Performance monitoring initialized');
+            }, 2000); // Increased delay to ensure game is loaded
+        });
+        
+        // Handle visibility changes (mobile background/foreground)
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                console.log('Game coming back to foreground');
+                // Don't force "Reconnecting..." - let the monitoring update with real status
+                setTimeout(() => {
+                    // Check actual connection state after a brief delay
+                    if (window.gameInstance && window.gameInstance.scene) {
+                        let mainScene = null;
+                        
+                        if (window.gameInstance.scene.scenes && window.gameInstance.scene.scenes.length > 0) {
+                            mainScene = window.gameInstance.scene.scenes[0];
+                        } else if (window.gameInstance.scene.getScene) {
+                            mainScene = window.gameInstance.scene.getScene('MainScene');
+                        } else if (window.gameInstance.scene.manager && window.gameInstance.scene.manager.scenes) {
+                            mainScene = window.gameInstance.scene.manager.scenes[0];
+                        } else if (window.gameInstance.scene.socket) {
+                            mainScene = window.gameInstance.scene;
+                        }
+                        
+                        if (mainScene && mainScene.socket && mainScene.socket.readyState === WebSocket.OPEN) {
+                            updateConnectionStatus('connected', 'Connected to server');
+                        }
+                    }
+                }, 500);
+            } else {
+                console.log('Game going to background');
+            }
+        });
+        
+        // Global error handler for WebRTC issues
+        window.addEventListener('error', (event) => {
+            if (event.error && event.error.message && event.error.message.includes('WebRTC')) {
+                console.error('WebRTC Error:', event.error);
+                updateWebRTCStatus('Error - Falling back to WebSocket', false);
+            }
+        });
+        
+        // Detect mobile and show appropriate UI
+        function detectMobile() {
+            return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        }
+        
+        if (detectMobile()) {
+            console.log('Mobile device detected - optimizing UI');
+            document.body.style.fontSize = '16px'; // Prevent zoom on iOS
+        }
+    </script>
 </body>
-</html>
+</html> 

@@ -533,12 +533,52 @@
       teamButtons.style.display = 'block';
       console.log('Team buttons should now be visible:', teamButtons);
       
-      // Load the game script
-      const script = document.createElement('script');
-      script.src = 'main.js';
-      document.body.appendChild(script);
+      // Load the game scripts in order
+      loadGameScripts();
     });
     
+    // Function to load game scripts in the correct order
+    function loadGameScripts() {
+      console.log('Loading game scripts...');
+      
+      // Load scripts in sequence
+      const scripts = [
+        'utils/device-detector.js',
+        'input-handlers/desktop-input.js', 
+        'input-handlers/mobile-input.js',
+        'main.js'
+      ];
+      
+      let currentIndex = 0;
+      
+      function loadNextScript() {
+        if (currentIndex >= scripts.length) {
+          console.log('All game scripts loaded successfully');
+          return;
+        }
+        
+        const script = document.createElement('script');
+        script.src = scripts[currentIndex];
+        
+        script.onload = () => {
+          console.log(`Loaded: ${scripts[currentIndex]}`);
+          currentIndex++;
+          loadNextScript();
+        };
+        
+        script.onerror = (error) => {
+          console.error(`Failed to load: ${scripts[currentIndex]}`, error);
+          // Continue loading other scripts even if one fails
+          currentIndex++;
+          loadNextScript();
+        };
+        
+        document.body.appendChild(script);
+      }
+      
+      loadNextScript();
+    }
+
     // Check if we're on a mobile browser
     function isMobileBrowser() {
       // Check for mobile user agents
