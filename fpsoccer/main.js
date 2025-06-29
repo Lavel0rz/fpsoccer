@@ -40,6 +40,8 @@ class MainScene extends Phaser.Scene {
     this.playerTeam = null;
     this.team1Score = 0;
     this.team2Score = 0;
+    this.team3Score = 0; // Yellow
+    this.team4Score = 0; // Green
     this.reconnectAttempts = 0;
     this.connectionAttempt = 0;
     this.isConnecting = false; // Track if we're currently connecting
@@ -153,7 +155,6 @@ class MainScene extends Phaser.Scene {
     // Add visibility change handler with improved mobile support
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
-        console.log('Page became visible');
         // If we have a pending reconnect, do it now
         if (this.pendingReconnect) {
           this.pendingReconnect = false;
@@ -167,8 +168,6 @@ class MainScene extends Phaser.Scene {
         else if (this.socket && this.socket.readyState === WebSocket.OPEN) {
           this.sendPing();
         }
-      } else {
-        console.log('Page hidden');
       }
     });
     
@@ -179,12 +178,15 @@ class MainScene extends Phaser.Scene {
     this.pingValue = 0;
     this.team1Score = 0;
     this.team2Score = 0;
+    this.team3Score = 0; // Yellow
+    this.team4Score = 0; // Green
     this.playerTeam = null;
     this.particleEmitterCreated = false;
     
     // Detect mobile browser
     this.isMobile = this.detectMobile();
     if (this.isMobile) {
+      // Log detection info for debugging
       console.log('Mobile browser detected');
     }
     
@@ -195,6 +197,10 @@ class MainScene extends Phaser.Scene {
     this.joystick = null;
     this.shootButton = null;
     this.boostButton = null;
+    
+    this.createTeamPieMenu = () => {
+      // ... code ...
+    };
   }
   
   // Detect if we're on a mobile device
@@ -227,7 +233,7 @@ class MainScene extends Phaser.Scene {
     this.load.image('ball', 'assets/ball.png');
     this.load.image('spark', 'assets/ship_blue.png');
     this.load.image('cannon', 'assets/cannon.png'); // Add cannon sprite
-    this.load.json('mapData', 'assets/map_data.json');
+    this.load.json('mapData', 'assets/cornerdefense.json');
     this.load.image('wall', 'assets/wall.png');
     this.load.image('goal', 'assets/goal.png');
     this.load.atlas('flares', 'https://labs.phaser.io/assets/particles/flares.png', 'https://labs.phaser.io/assets/particles/flares.json');
@@ -337,32 +343,29 @@ class MainScene extends Phaser.Scene {
     console.log(`Goal Y range: ${minY} to ${maxY}, middle: ${middleY}`);
     
     // Create colored rectangles for goals
-    const redGoalColor = 0xff0000;
-    const blueGoalColor = 0x0000ff;
-    
-    // Create map objects with appropriate coloring
+    const goalColors = {
+      'goal_red': 0xff0000,
+      'goal_blue': 0x0000ff,
+      'goal_yellow': 0xffdc00,
+      'goal_green': 0x00c800,
+      'goal': 0xffffff // fallback for old maps
+    };
+
     mapData.forEach(obj => {
       let sprite;
       if (obj.type === 'wall') {
         sprite = this.add.image(obj.x + obj.width/2, obj.y + obj.height/2, 'wall')
           .setDisplaySize(obj.width, obj.height)
           .setOrigin(0.5);
-      } else if (obj.type === 'goal') {
-        // Instead of tinting, create colored rectangles for goals
-        const isNorthGoal = obj.y < middleY;
-        const goalColor = isNorthGoal ? redGoalColor : blueGoalColor;
-        const teamText = isNorthGoal ? "RED" : "BLUE";
-        
-        console.log(`Creating ${teamText} goal at (${obj.x}, ${obj.y})`);
-        
-        // Create a colored rectangle for the goal
+      } else if (obj.type.startsWith('goal')) {
+        const color = goalColors[obj.type] || 0xffffff;
         sprite = this.add.rectangle(
-          obj.x + obj.width/2, 
-          obj.y + obj.height/2, 
-          obj.width, 
-          obj.height, 
-          goalColor,
-          0.5 // Alpha (semi-transparent)
+          obj.x + obj.width/2,
+          obj.y + obj.height/2,
+          obj.width,
+          obj.height,
+          color,
+          0.5
         ).setOrigin(0.5);
       }
     });
@@ -393,7 +396,7 @@ class MainScene extends Phaser.Scene {
     // Initialize cannon position
     this.updateCannonPosition();
     
-    this.ball = this.add.sprite(400, 400, 'ball').setScale(0.55).setOrigin(0.5);
+    this.ball = this.add.sprite(400, 400, 'ball').setScale(0.75).setOrigin(0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
     
@@ -411,6 +414,15 @@ class MainScene extends Phaser.Scene {
     this.blueScoreText = this.add.text(this.scoreSeparator.x + this.scoreSeparator.width, scoreY, "0", { font: "16px Arial", fill: "#0000ff" }).setScrollFactor(0);
     
     this.teamText = this.add.text(10, 70, "Team: --", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    
+    // Initialize team scores for 4-team support
+    this.team1Score = 0;
+    this.team2Score = 0;
+    this.team3Score = 0;
+    this.team4Score = 0;
+    
+    // Create initial score pie chart
+    this.createScorePieChart();
     
     // Get player display name from window object or use default
     const playerName = window.PLAYER_DISPLAY_NAME || 'You';
@@ -449,8 +461,14 @@ class MainScene extends Phaser.Scene {
               this.scoreLabel, this.redScoreText, this.scoreSeparator, this.blueScoreText,
               this.teamText, 
               this.boostCircle, 
-              this.playerNameText
+              this.playerNameText,
+              this.scorePieChart, this.scorePieTitle
             ].filter(element => element !== undefined);
+            
+            // Also ignore score pie text elements if they exist
+            if (this.scorePieTexts) {
+              elementsToIgnore.push(...this.scorePieTexts.filter(element => element !== undefined));
+            }
             
             // Only call ignore if we have elements to ignore and minimap exists
             if (elementsToIgnore.length > 0 && this.minimap && typeof this.minimap.ignore === 'function') {
@@ -723,6 +741,10 @@ class MainScene extends Phaser.Scene {
                   this.ship.setTint(0xff0000);
                 } else if (this.playerTeam === 'blue') {
                   this.ship.setTint(0x0000ff);
+                } else if (this.playerTeam === 'yellow') {
+                  this.ship.setTint(0xffdc00);
+                } else if (this.playerTeam === 'green') {
+                  this.ship.setTint(0x00c800);
                 }
                 
                 // Show/hide reset button based on host status
@@ -739,13 +761,22 @@ class MainScene extends Phaser.Scene {
               
               // Handle goal event
               if (msg.type === "goal") {
+                console.log("GOAL EVENT RECEIVED (First Handler):", msg);
                 this.team1Score = msg.team1_score;
                 this.team2Score = msg.team2_score;
+                this.team3Score = msg.team3_score || 0;
+                this.team4Score = msg.team4_score || 0;
                 this.updateScoreDisplay();
                 
-                // Show goal animation with team color
-                const scorerTeam = msg.scorer_team;
-                this.showGoalAnimation(scorerTeam);
+                // Show goal message with scorer name
+                if (msg.scored_on_team) {
+                  const goalColor = msg.scored_on_team.toLowerCase();
+                  const scorerName = msg.scorer_name || "Unknown Player";
+                  const notificationMessage = `${scorerName} scored on ${goalColor} goal! ${msg.scored_on_team} team gets exclusive ball access.`;
+                  console.log("SHOWING GOAL NOTIFICATION:", notificationMessage);
+                  this.showNotification(notificationMessage, false);
+                }
+                
                 return;
               }
               
@@ -1430,9 +1461,6 @@ class MainScene extends Phaser.Scene {
         };
       }
       
-      // Log the input message for debugging
-      console.log('Sending input:', JSON.stringify(input));
-      
       this.socket.send(JSON.stringify(input));
       this.lastInputTime = Date.now();
     }
@@ -1560,6 +1588,42 @@ class MainScene extends Phaser.Scene {
   updateBall(time, delta) {
     if (!this.latestBallState || !this.ball) return;
 
+    // Handle ball pickup cooldown and team exclusive access
+    if (this.latestBallState.pickup_cooldown > 0) {
+      // During cooldown: Make the ball glow cyan
+      const glowIntensity = Math.sin(time * 0.01) * 0.5 + 0.5; // Oscillates between 0 and 1
+      const baseColor = 0xffffff; // White
+      const glowColor = 0x00ffff; // Cyan glow
+      
+      // Interpolate between base color and glow color
+      const r = Math.floor(255 * (1 - glowIntensity) + (glowColor >> 16 & 0xff) * glowIntensity);
+      const g = Math.floor(255 * (1 - glowIntensity) + (glowColor >> 8 & 0xff) * glowIntensity);
+      const b = Math.floor(255 * (1 - glowIntensity) + (glowColor & 0xff) * glowIntensity);
+      
+      const finalColor = (r << 16) | (g << 8) | b;
+      this.ball.setTint(finalColor);
+      
+      // Also make the ball slightly larger during cooldown
+      const scale = 1.0 + glowIntensity * 0.2; // Scale between 1.0 and 1.2
+      this.ball.setScale(scale);
+    } else if (this.latestBallState.exclusive_team) {
+      // After cooldown: Set ball color to match exclusive team
+      const teamColors = {
+        'Red': 0xff0000,
+        'Blue': 0x0078ff,
+        'Yellow': 0xffdc00,
+        'Green': 0x00c800
+      };
+      
+      const teamColor = teamColors[this.latestBallState.exclusive_team] || 0xffffff;
+      this.ball.setTint(teamColor);
+      this.ball.setScale(0.75);
+    } else {
+      // Normal state: Reset ball appearance
+      this.ball.clearTint();
+      this.ball.setScale(0.75);
+    }
+
     // Handle ball grabbing
     if (this.latestBallState.grabbed) {
       if (this.latestBallState.owner === this.clientId) {
@@ -1602,10 +1666,12 @@ class MainScene extends Phaser.Scene {
     // Maintain a history buffer for ball positions - but keep it small
     if (!this.ballHistory) this.ballHistory = [];
     
-    // Add current state to history
+    // Add current state to history including velocity for bounce detection
     this.ballHistory.push({
       x: this.latestBallState.x,
       y: this.latestBallState.y,
+      vx: this.latestBallState.vx || 0,
+      vy: this.latestBallState.vy || 0,
       timestamp: time
     });
     
@@ -1625,15 +1691,157 @@ class MainScene extends Phaser.Scene {
       
       this.ball.x = Phaser.Math.Linear(this.ball.x, curr.x, smoothingFactor);
       this.ball.y = Phaser.Math.Linear(this.ball.y, curr.y, smoothingFactor);
-      this.ball.setDepth(0);
+      
+      // Enhanced wall bouncing visual feedback
+      this.updateBallWallInteraction(prev, curr);
+      
+      this.ball.setDepth(16); // Set higher than players and cannons (cannons are at 15) so ball renders on top during collisions
       this.ball.setVisible(true);
     } else {
       // If we don't have enough history, just use the latest position
       this.ball.x = this.latestBallState.x;
       this.ball.y = this.latestBallState.y;
-      this.ball.setDepth(0);
+      this.ball.setDepth(16); // Set higher than players and cannons so ball renders on top during collisions
       this.ball.setVisible(true);
     }
+  }
+
+  // Enhanced wall bouncing visual feedback
+  updateBallWallInteraction(prev, curr) {
+    if (!prev || !curr) return;
+    
+    // Calculate velocity and direction change
+    const prevVx = prev.vx || 0;
+    const prevVy = prev.vy || 0;
+    const currVx = curr.vx || 0;
+    const currVy = curr.vy || 0;
+    
+    // Detect significant direction changes (indicating a bounce)
+    const velocityChangeX = Math.abs(currVx - prevVx);
+    const velocityChangeY = Math.abs(currVy - prevVy);
+    const significantBounce = velocityChangeX > 50 || velocityChangeY > 50;
+    
+    if (significantBounce) {
+      // Create bounce effect - make ball slightly larger and add particles
+      this.createBounceEffect(curr.x, curr.y, currVx, currVy);
+    }
+    
+    // Check proximity to walls and adjust ball appearance
+    const wallProximity = this.getWallProximity(curr.x, curr.y);
+    if (wallProximity.distance < 30) { // Within 30 pixels of a wall
+      // Slightly stretch the ball in the direction away from the wall
+      this.adjustBallForWallProximity(wallProximity);
+    } else {
+      // Reset ball to normal appearance when away from walls
+      if (!this.latestBallState.pickup_cooldown && !this.latestBallState.exclusive_team) {
+        this.ball.setScale(0.75); // Slightly larger than default 0.7 for better visibility
+      }
+    }
+  }
+  
+  createBounceEffect(x, y, vx, vy) {
+    // Create a brief flash effect at bounce location
+    const bounceFlash = this.add.circle(x, y, 15, 0xffffff, 0.6);
+    bounceFlash.setDepth(17); // Above the ball
+    
+    // Fade out the flash
+    this.tweens.add({
+      targets: bounceFlash,
+      alpha: 0,
+      scale: 0.3,
+      duration: 150,
+      onComplete: () => bounceFlash.destroy()
+    });
+    
+    // Add particle effects in the bounce direction
+    if (this.particleEmitter) {
+      // Emit particles in the direction opposite to the ball's movement
+      const particleAngle = Math.atan2(-vy, -vx);
+      for (let i = 0; i < 8; i++) {
+        const spread = 0.5; // Spread particles in a cone
+        const angle = particleAngle + (Math.random() - 0.5) * spread;
+        const distance = 20 + Math.random() * 15;
+        
+        this.particleEmitter.emitParticleAt(
+          x + Math.cos(angle) * distance,
+          y + Math.sin(angle) * distance
+        );
+      }
+    }
+    
+    // Briefly make the ball pulse larger
+    this.ball.setScale(0.95);
+    this.tweens.add({
+      targets: this.ball,
+      scaleX: 0.75,
+      scaleY: 0.75,
+      duration: 120,
+      ease: 'Back.easeOut'
+    });
+  }
+  
+  getWallProximity(x, y) {
+    let minDistance = Infinity;
+    let closestWallNormal = { x: 0, y: 0 };
+    
+    // Check distance to map walls
+    if (this.mapObjects) {
+      this.mapObjects.forEach(obj => {
+        if (obj.type === 'wall') {
+          // Calculate distance to wall rectangle
+          const wallLeft = obj.x;
+          const wallRight = obj.x + obj.width;
+          const wallTop = obj.y;
+          const wallBottom = obj.y + obj.height;
+          
+          // Find closest point on wall to ball
+          const closestX = Math.max(wallLeft, Math.min(x, wallRight));
+          const closestY = Math.max(wallTop, Math.min(y, wallBottom));
+          
+          const distance = Math.sqrt((x - closestX) ** 2 + (y - closestY) ** 2);
+          
+          if (distance < minDistance) {
+            minDistance = distance;
+            
+            // Calculate normal vector pointing away from wall
+            if (x < wallLeft) closestWallNormal = { x: -1, y: 0 };
+            else if (x > wallRight) closestWallNormal = { x: 1, y: 0 };
+            else if (y < wallTop) closestWallNormal = { x: 0, y: -1 };
+            else if (y > wallBottom) closestWallNormal = { x: 0, y: 1 };
+          }
+        }
+      });
+    }
+    
+    return { distance: minDistance, normal: closestWallNormal };
+  }
+  
+  adjustBallForWallProximity(wallProximity) {
+    const { distance, normal } = wallProximity;
+    
+    // Calculate compression effect based on proximity
+    const maxProximity = 30;
+    const compressionFactor = Math.max(0, (maxProximity - distance) / maxProximity);
+    
+    // Slightly squish the ball toward the wall and stretch it away
+    const baseScale = 0.75;
+    const squishAmount = compressionFactor * 0.15; // Maximum 15% compression
+    
+    let scaleX = baseScale;
+    let scaleY = baseScale;
+    
+    // Compress in the direction of the wall normal
+    if (Math.abs(normal.x) > Math.abs(normal.y)) {
+      // Horizontal wall - compress horizontally, stretch vertically
+      scaleX = baseScale - squishAmount;
+      scaleY = baseScale + squishAmount * 0.5;
+    } else {
+      // Vertical wall - compress vertically, stretch horizontally  
+      scaleX = baseScale + squishAmount * 0.5;
+      scaleY = baseScale - squishAmount;
+    }
+    
+    this.ball.setScale(scaleX, scaleY);
   }
 
   generateParticles() {
@@ -1660,23 +1868,9 @@ class MainScene extends Phaser.Scene {
     const dt = delta / 1000;
     const shipSpeed = 120; // Increased from 100 to 120 (20% faster) to match server
     
-    // Initialize direction change flags for use throughout the method
-    let oppositeDirection = false;
-    let directionChanged = false;
-    let targetLength = 0;
-    
-    // Initialize smoothedDirection if it doesn't exist
-    if (!this.smoothedDirection) {
-      this.smoothedDirection = { x: 0, y: 0 };
-    }
-    
     // Only process input if player can move (not during countdown)
     if (this.playerCanMove !== false) {
-      // Store previous target direction for change detection
-      const prevTargetX = this.targetDirection.x;
-      const prevTargetY = this.targetDirection.y;
-      
-      // Calculate target direction based on input
+      // Calculate target direction based on input - direct, no smoothing
       this.targetDirection.x = 0;
       this.targetDirection.y = 0;
       
@@ -1691,120 +1885,40 @@ class MainScene extends Phaser.Scene {
         if (this.inputState.down) this.targetDirection.y += 1;
         
         // Normalize target direction if it's not zero
-        targetLength = Math.sqrt(this.targetDirection.x * this.targetDirection.x + this.targetDirection.y * this.targetDirection.y);
+        const targetLength = Math.sqrt(this.targetDirection.x * this.targetDirection.x + this.targetDirection.y * this.targetDirection.y);
         if (targetLength > 0) {
           this.targetDirection.x /= targetLength;
           this.targetDirection.y /= targetLength;
         }
       }
       
-      // Detect significant direction changes
-      if (targetLength > 0 && (prevTargetX !== 0 || prevTargetY !== 0)) {
-        // Calculate dot product to detect direction change
-        const dotProduct = this.targetDirection.x * prevTargetX + this.targetDirection.y * prevTargetY;
-        // If dot product is negative, directions are opposite (>90 degrees)
-        oppositeDirection = dotProduct < 0;
-        // If dot product is negative or small, direction changed significantly
-        directionChanged = dotProduct < 0.7;
-      }
-      
       // For desktop, we don't update the movement direction from keyboard input
       // since it's now controlled by the mouse position
       if (this.isMobile) {
-        // Gradually turn towards the target direction (for mobile only)
-        if (targetLength > 0) {
-          // Interpolate current direction towards target direction
-          this.movementDirection.x = Phaser.Math.Linear(this.movementDirection.x, this.targetDirection.x, this.turnSpeed);
-          this.movementDirection.y = Phaser.Math.Linear(this.movementDirection.y, this.targetDirection.y, this.turnSpeed);
-          
-          // Normalize the movement direction
-          const moveLength = Math.sqrt(this.movementDirection.x * this.movementDirection.x + this.movementDirection.y * this.movementDirection.y);
-          if (moveLength > 0) {
-            this.movementDirection.x /= moveLength;
-            this.movementDirection.y /= moveLength;
-          }
+        // For mobile, use direct joystick input without smoothing
+        if (this.targetDirection.x !== 0 || this.targetDirection.y !== 0) {
+          this.movementDirection.x = this.targetDirection.x;
+          this.movementDirection.y = this.targetDirection.y;
           
           // Update aim target to be in the direction of movement
           const aimDistance = 100; // How far ahead to aim
           this.aimTarget.x = this.ship.x + this.movementDirection.x * aimDistance;
           this.aimTarget.y = this.ship.y + this.movementDirection.y * aimDistance;
         } else {
-          // If no input, gradually slow down
-          this.movementDirection.x *= 0.95;
-          this.movementDirection.y *= 0.95;
+          // If no input, stop immediately
+          this.movementDirection.x = 0;
+          this.movementDirection.y = 0;
         }
       }
     }
     
-    // Apply easing to direction changes
-    // Use different easing factors based on whether direction changed significantly
-    // For opposite directions (180-degree turns), use an even smaller factor
-    const easingFactor = oppositeDirection ? 0.02 : (directionChanged ? 0.08 : 0.15);
+    // Use target direction directly for movement - no smoothing/easing
+    const moveDirection = { x: this.targetDirection.x, y: this.targetDirection.y };
     
-    // For opposite direction changes, create a more natural arc-like transition
-    if (oppositeDirection && targetLength > 0) {
-      // For opposite directions, we'll use a simple lerp approach for maximum smoothness
-      // This creates a very natural, gradual turning motion
-      
-      // Use a more aggressive lerp factor for opposite directions
-      const oppositeLerpFactor = 0.04; // Increased from 0.015 for more aggressive turning
-      
-      // Simple linear interpolation between current and target direction
-      this.smoothedDirection.x = Phaser.Math.Linear(
-        this.smoothedDirection.x, 
-        this.targetDirection.x, 
-        oppositeLerpFactor
-      );
-      this.smoothedDirection.y = Phaser.Math.Linear(
-        this.smoothedDirection.y, 
-        this.targetDirection.y, 
-        oppositeLerpFactor
-      );
-      
-      // Normalize the direction vector to maintain consistent speed
-      const smoothedLength = Math.sqrt(
-        this.smoothedDirection.x * this.smoothedDirection.x + 
-        this.smoothedDirection.y * this.smoothedDirection.y
-      );
-      
-      if (smoothedLength > 0.01) {
-        this.smoothedDirection.x /= smoothedLength;
-        this.smoothedDirection.y /= smoothedLength;
-      }
-    } else {
-      // For non-opposite directions, use normal linear interpolation with standard factor
-      this.smoothedDirection.x = Phaser.Math.Linear(
-        this.smoothedDirection.x, 
-        this.targetDirection.x, 
-        easingFactor
-      );
-      this.smoothedDirection.y = Phaser.Math.Linear(
-        this.smoothedDirection.y, 
-        this.targetDirection.y, 
-        easingFactor
-      );
-    }
-    
-    // Normalize smoothed direction if it's not zero
-    const smoothedLength = Math.sqrt(
-      this.smoothedDirection.x * this.smoothedDirection.x + 
-      this.smoothedDirection.y * this.smoothedDirection.y
-    );
-    
-    if (smoothedLength > 0) {
-      // Only normalize if length is significant to avoid division by very small numbers
-      if (smoothedLength > 0.01) {
-        this.smoothedDirection.x /= smoothedLength;
-        this.smoothedDirection.y /= smoothedLength;
-      }
-      
-      // Update predicted position based on smoothed direction
-      this.predictedState.x += this.smoothedDirection.x * shipSpeed * dt;
-      this.predictedState.y += this.smoothedDirection.y * shipSpeed * dt;
-    } else if (targetLength === 0) {
-      // If no input and smoothed direction is very small, just zero it out
-      this.smoothedDirection.x = 0;
-      this.smoothedDirection.y = 0;
+    // Update predicted position based on direct input direction
+    if (moveDirection.x !== 0 || moveDirection.y !== 0) {
+      this.predictedState.x += moveDirection.x * shipSpeed * dt;
+      this.predictedState.y += moveDirection.y * shipSpeed * dt;
     }
     
     // Server reconciliation - smoothly correct client prediction errors
@@ -1836,9 +1950,9 @@ class MainScene extends Phaser.Scene {
     this.ship.y = this.predictedState.y;
     
     // Update ship animation based on movement direction
-    if (!this.isMobile && (this.smoothedDirection.x !== 0 || this.smoothedDirection.y !== 0)) {
+    if (!this.isMobile && (moveDirection.x !== 0 || moveDirection.y !== 0)) {
       // Update ship animation based on movement direction
-      this.updateShipAnimation(this.ship, this.smoothedDirection, true);
+      this.updateShipAnimation(this.ship, moveDirection, true);
       
       // Update cannon position after animation change
       this.updateCannonPosition();
@@ -2037,15 +2151,20 @@ class MainScene extends Phaser.Scene {
   
   // Update the score display
   updateScoreDisplay() {
-    if (this.serverState.team1_score !== undefined && this.serverState.team2_score !== undefined) {
-      // Update the individual score text objects
-      this.redScoreText.setText(this.serverState.team1_score.toString());
-      this.blueScoreText.setText(this.serverState.team2_score.toString());
-      
-      // Reposition the elements to account for changing text widths
-      this.scoreSeparator.x = this.redScoreText.x + this.redScoreText.width;
-      this.blueScoreText.x = this.scoreSeparator.x + this.scoreSeparator.width;
-    }
+    // Update scores from server state
+    if (this.serverState.team1_score !== undefined) this.team1Score = this.serverState.team1_score;
+    if (this.serverState.team2_score !== undefined) this.team2Score = this.serverState.team2_score;
+    if (this.serverState.team3_score !== undefined) this.team3Score = this.serverState.team3_score;
+    if (this.serverState.team4_score !== undefined) this.team4Score = this.serverState.team4_score;
+    
+    // Create/update the score pie chart at the top center
+    this.createScorePieChart();
+    
+    // Hide legacy score display
+    if (this.scoreLabel) this.scoreLabel.setVisible(false);
+    if (this.redScoreText) this.redScoreText.setVisible(false);
+    if (this.scoreSeparator) this.scoreSeparator.setVisible(false);
+    if (this.blueScoreText) this.blueScoreText.setVisible(false);
   }
   
   // Add method to update projectiles
@@ -2250,14 +2369,25 @@ class MainScene extends Phaser.Scene {
     if (team) {
       // Normalize team name format (could be 'Red'/'Blue' or 'red'/'blue')
       const normalizedTeam = typeof team === 'string' ? team.toLowerCase() : team;
-      const displayTeam = typeof team === 'string' ? team : (normalizedTeam === 'red' ? 'Red' : 'Blue');
+      let displayTeam = typeof team === 'string' ? team : normalizedTeam;
+      
+      // Ensure proper capitalization
+      if (normalizedTeam === 'red') displayTeam = 'Red';
+      else if (normalizedTeam === 'blue') displayTeam = 'Blue'; 
+      else if (normalizedTeam === 'yellow') displayTeam = 'Yellow';
+      else if (normalizedTeam === 'green') displayTeam = 'Green';
       
       console.log(`Updating team display to: ${displayTeam} (normalized: ${normalizedTeam})`);
       
       this.teamText.setText(`Team: ${displayTeam}`);
       
       // Set color based on team
-      const teamColor = normalizedTeam === 'red' ? '#ff0000' : '#0000ff';
+      let teamColor = '#ffffff';
+      if (normalizedTeam === 'red') teamColor = '#ff0000';
+      else if (normalizedTeam === 'blue') teamColor = '#0000ff';
+      else if (normalizedTeam === 'yellow') teamColor = '#ffdc00';
+      else if (normalizedTeam === 'green') teamColor = '#00c800';
+      
       this.teamText.setStyle({ font: "16px Arial", fill: teamColor });
       
       // Store the current team
@@ -2267,59 +2397,10 @@ class MainScene extends Phaser.Scene {
   
   // Add method to show goal animation
   showGoalAnimation(scorerTeam) {
-    console.log(`Showing goal animation for team: ${scorerTeam}`);
-    
-    // Define team colors
-    const teamColors = {
-      'red': '#ff0000',
-      'blue': '#0078ff',
-      'yellow': '#ffdc00',
-      'green': '#00c800'
-    };
-    
-    // Normalize team name and get color
-    const normalizedTeam = typeof scorerTeam === 'string' ? scorerTeam.toLowerCase() : scorerTeam;
-    const teamColor = teamColors[normalizedTeam] || '#ffffff';
-    
-    // Create a background rectangle for better visibility
-    const bgRect = this.add.rectangle(
-      this.cameras.main.centerX,
-      this.cameras.main.centerY,
-      600,
-      150,
-      0x000000,
-      0.7
-    ).setScrollFactor(0).setOrigin(0.5);
-    
-    // Create the main goal text
-    const goalText = this.add.text(
-      this.cameras.main.centerX, 
-      this.cameras.main.centerY - 20, 
-      `GOAL!`, 
-      { font: 'bold 48px Arial', fill: '#ffffff', align: 'center' }
-    ).setOrigin(0.5).setScrollFactor(0);
-    
-    // Create the team scored text
-    const teamText = this.add.text(
-      this.cameras.main.centerX, 
-      this.cameras.main.centerY + 30, 
-      `${normalizedTeam.toUpperCase()} TEAM SCORED`, 
-      { font: 'bold 32px Arial', fill: teamColor, align: 'center' }
-    ).setOrigin(0.5).setScrollFactor(0);
-    
-    // Add a tween to make the text and background fade out
-    this.tweens.add({
-      targets: [bgRect, goalText, teamText],
-      alpha: 0,
-      y: '-=50',
-      duration: 2000,
-      ease: 'Power2',
-      onComplete: () => {
-        bgRect.destroy();
-        goalText.destroy();
-        teamText.destroy();
-      }
-    });
+    // DISABLED: This method was causing stuck UI elements
+    // Goals are now shown via simple notifications instead
+    console.log(`Goal animation disabled for team: ${scorerTeam}`);
+    return;
   }
 
   updateBoostCircle() {
@@ -2593,7 +2674,47 @@ class MainScene extends Phaser.Scene {
     // Update scores
     this.team1Score = message.team1_score;
     this.team2Score = message.team2_score;
+    this.team3Score = message.team3_score || 0;
+    this.team4Score = message.team4_score || 0;
     this.updateScoreDisplay();
+    
+    // Reset ball state to ensure it's visible and not grabbed
+    if (this.ball) {
+      this.ball.grabbed = false;
+      this.ball.owner = null;
+      this.ball.setVisible(true);
+    }
+    
+    // Clear ball history to prevent old positions from affecting display
+    this.ballHistory = [];
+    this.latestBallState = null;
+    
+    // WORKAROUND: Reset input sequence to sync with server
+    this.inputSequence = 1;
+    
+    // WORKAROUND: Clear input state to prevent stuck inputs
+    this.inputState = {
+      left: false,
+      right: false, 
+      up: false,
+      down: false,
+      shoot: false,
+      boost: false
+    };
+    
+    // WORKAROUND: Force send a fresh input after countdown
+    this.time.delayedCall(6500, () => {
+      this.sendInput();
+    });
+    
+    // Ensure player movement will be re-enabled after countdown
+    // (This is a backup in case countdown messages are missed)
+    this.time.delayedCall(6000, () => {
+      this.playerCanMove = true;
+      if (this.countdownText) {
+        this.countdownText.setVisible(false);
+      }
+    });
     
     // Show reset notification
     this.showNotification('Game has been reset!', false);
@@ -2601,10 +2722,12 @@ class MainScene extends Phaser.Scene {
   
   // Add method to show notifications
   showNotification(message, isError = false) {
+    console.log("showNotification called with message:", message);
     // Create notification container if it doesn't exist
     if (!this.notificationContainer) {
       this.notificationContainer = this.add.container(this.cameras.main.width / 2, 150);
       this.notificationContainer.setDepth(1000);
+      console.log("Created notification container at:", this.cameras.main.width / 2, 150);
     }
     
     // Clear any existing notifications
@@ -3152,17 +3275,7 @@ class MainScene extends Phaser.Scene {
           return;
         }
         
-        // Handle goal event
-        if (msg.type === "goal") {
-          this.serverState.team1_score = msg.team1_score;
-          this.serverState.team2_score = msg.team2_score;
-          this.updateScoreDisplay();
-          
-          // Show goal animation with team color
-          const scorerTeam = msg.scorer_team;
-          this.showGoalAnimation(scorerTeam);
-          return;
-        }
+
         
         // Handle game state update
         const serverTimestamp = msg.time;
@@ -3191,6 +3304,10 @@ class MainScene extends Phaser.Scene {
                 this.ship.setTint(0xff0000); // Red tint
               } else if (msg.players[this.clientId].team === 'Blue') {
                 this.ship.setTint(0x0000ff); // Blue tint
+              } else if (msg.players[this.clientId].team === 'Yellow') {
+                this.ship.setTint(0xffdc00); // Yellow tint
+              } else if (msg.players[this.clientId].team === 'Green') {
+                this.ship.setTint(0x00c800); // Green tint
               }
               
               // Update team display
@@ -3219,6 +3336,10 @@ class MainScene extends Phaser.Scene {
                 sprite.setTint(0xff0000); // Red tint
               } else if (shipState.team === 'Blue') {
                 sprite.setTint(0x0000ff); // Blue tint
+              } else if (shipState.team === 'Yellow') {
+                sprite.setTint(0xffdc00); // Yellow tint
+              } else if (shipState.team === 'Green') {
+                sprite.setTint(0x00c800); // Green tint
               }
               
               // Store the current team for change detection
@@ -3265,6 +3386,10 @@ class MainScene extends Phaser.Scene {
                   sprite.setTint(0xff0000); // Red tint
                 } else if (shipState.team === 'Blue') {
                   sprite.setTint(0x0000ff); // Blue tint
+                } else if (shipState.team === 'Yellow') {
+                  sprite.setTint(0xffdc00); // Yellow tint
+                } else if (shipState.team === 'Green') {
+                  sprite.setTint(0x00c800); // Green tint
                 }
               }
               
@@ -3319,7 +3444,7 @@ class MainScene extends Phaser.Scene {
             // Store ball properties for use in updateBoostCircle
             if (!this.ball) {
               this.ball = this.add.sprite(400, 300, 'ball');
-              this.ball.setDepth(5);
+              this.ball.setDepth(16); // Set consistent with free ball depth (above players and cannons)
             }
             this.ball.grabbed = msg.ball.grabbed;
             this.ball.owner = msg.ball.owner;
@@ -3344,11 +3469,10 @@ class MainScene extends Phaser.Scene {
         }
         
         // Update scores
-        if (msg.team1_score !== undefined && msg.team2_score !== undefined) {
-          this.serverState.team1_score = msg.team1_score;
-          this.serverState.team2_score = msg.team2_score;
-          this.updateScoreDisplay();
-        }
+        if (msg.team1_score !== undefined) this.team1Score = msg.team1_score;
+        if (msg.team2_score !== undefined) this.team2Score = msg.team2_score;
+        if (msg.team3_score !== undefined) this.team3Score = msg.team3_score;
+        if (msg.team4_score !== undefined) this.team4Score = msg.team4_score;
       } catch (error) {
         console.error('Error processing message:', error);
       }
@@ -3496,60 +3620,203 @@ class MainScene extends Phaser.Scene {
 
   // Add method to show goal animation
   showGoalAnimation(scorerTeam) {
-    console.log(`Showing goal animation for team: ${scorerTeam}`);
-    
-    // Define team colors
-    const teamColors = {
-      'red': '#ff0000',
-      'blue': '#0078ff',
-      'yellow': '#ffdc00',
-      'green': '#00c800'
-    };
-    
-    // Normalize team name and get color
-    const normalizedTeam = typeof scorerTeam === 'string' ? scorerTeam.toLowerCase() : scorerTeam;
-    const teamColor = teamColors[normalizedTeam] || '#ffffff';
-    
-    // Create a background rectangle for better visibility
-    const bgRect = this.add.rectangle(
-      this.cameras.main.centerX,
-      this.cameras.main.centerY,
-      600,
-      150,
-      0x000000,
-      0.7
-    ).setScrollFactor(0).setOrigin(0.5);
-    
-    // Create the main goal text
-    const goalText = this.add.text(
-      this.cameras.main.centerX, 
-      this.cameras.main.centerY - 20, 
-      `GOAL!`, 
-      { font: 'bold 48px Arial', fill: '#ffffff', align: 'center' }
-    ).setOrigin(0.5).setScrollFactor(0);
-    
-    // Create the team scored text
-    const teamText = this.add.text(
-      this.cameras.main.centerX, 
-      this.cameras.main.centerY + 30, 
-      `${normalizedTeam.toUpperCase()} TEAM SCORED`, 
-      { font: 'bold 32px Arial', fill: teamColor, align: 'center' }
-    ).setOrigin(0.5).setScrollFactor(0);
-    
-    // Add a tween to make the text and background fade out
-    this.tweens.add({
-      targets: [bgRect, goalText, teamText],
-      alpha: 0,
-      y: '-=50',
-      duration: 2000,
-      ease: 'Power2',
-      onComplete: () => {
-        bgRect.destroy();
-        goalText.destroy();
-        teamText.destroy();
-      }
-    });
+    // DISABLED: This method was causing stuck UI elements
+    // Goals are now shown via simple notifications instead
+    console.log(`Goal animation disabled for team: ${scorerTeam}`);
+    return;
   }
+
+  createScorePieChart() {
+    // Clean up existing score pie chart
+    if (this.scorePieChart) this.scorePieChart.destroy();
+    if (this.scorePieTexts) this.scorePieTexts.forEach(t => t.destroy());
+    if (this.scorePieTitle) this.scorePieTitle.destroy();
+    
+    // Create new score pie chart
+    this.scorePieChart = this.add.graphics();
+    this.scorePieTexts = [];
+    
+    // Position at top center of screen
+    const centerX = this.cameras.main.centerX;
+    const centerY = 80; // Top of screen
+    const radius = 50;
+    
+    // Team data with scores
+    const teams = [
+      { name: 'Red', color: 0xff0000, score: this.team1Score || 0 },
+      { name: 'Blue', color: 0x0078ff, score: this.team2Score || 0 },
+      { name: 'Yellow', color: 0xffdc00, score: this.team3Score || 0 },
+      { name: 'Green', color: 0x00c800, score: this.team4Score || 0 },
+    ];
+    
+    // Calculate total score for proportional slices
+    const totalScore = teams.reduce((sum, team) => sum + team.score, 0);
+    
+    // If no scores yet, show equal slices
+    if (totalScore === 0) {
+      const anglePer = (2 * Math.PI) / teams.length;
+      teams.forEach((team, i) => {
+        const startAngle = i * anglePer - Math.PI/2;
+        const endAngle = startAngle + anglePer;
+        
+        this.scorePieChart.beginPath();
+        this.scorePieChart.moveTo(centerX, centerY);
+        this.scorePieChart.arc(centerX, centerY, radius, startAngle, endAngle, false);
+        this.scorePieChart.closePath();
+        this.scorePieChart.fillStyle(team.color, 0.8);
+        this.scorePieChart.fillPath();
+        this.scorePieChart.lineStyle(2, 0xffffff, 1);
+        this.scorePieChart.strokePath();
+        
+        // Add team name and score
+        const midAngle = (startAngle + endAngle) / 2;
+        const textX = centerX + Math.cos(midAngle) * (radius * 0.7);
+        const textY = centerY + Math.sin(midAngle) * (radius * 0.7);
+        const text = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
+          font: 'bold 12px Arial',
+          fill: '#fff',
+          align: 'center',
+          stroke: '#000',
+          strokeThickness: 2
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+        this.scorePieTexts.push(text);
+      });
+    } else {
+      // Show proportional slices based on scores
+      let currentAngle = -Math.PI/2; // Start at top
+      teams.forEach((team) => {
+        const proportion = team.score / totalScore;
+        const sliceAngle = proportion * 2 * Math.PI;
+        const endAngle = currentAngle + sliceAngle;
+        
+        if (sliceAngle > 0) {
+          this.scorePieChart.beginPath();
+          this.scorePieChart.moveTo(centerX, centerY);
+          this.scorePieChart.arc(centerX, centerY, radius, currentAngle, endAngle, false);
+          this.scorePieChart.closePath();
+          this.scorePieChart.fillStyle(team.color, 0.8);
+          this.scorePieChart.fillPath();
+          this.scorePieChart.lineStyle(2, 0xffffff, 1);
+          this.scorePieChart.strokePath();
+          
+          // Add team name and score at the middle of the slice
+          const midAngle = (currentAngle + endAngle) / 2;
+          const textX = centerX + Math.cos(midAngle) * (radius * 0.7);
+          const textY = centerY + Math.sin(midAngle) * (radius * 0.7);
+          const text = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
+            font: 'bold 12px Arial',
+            fill: '#fff',
+            align: 'center',
+            stroke: '#000',
+            strokeThickness: 2
+          }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+          this.scorePieTexts.push(text);
+        }
+        
+        currentAngle = endAngle;
+      });
+    }
+    
+    // Add title
+    this.scorePieTitle = this.add.text(centerX, centerY - radius - 20, 'TEAM SCORES', {
+      font: 'bold 16px Arial',
+      fill: '#ffffff',
+      align: 'center',
+      stroke: '#000',
+      strokeThickness: 2
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+    
+    this.scorePieChart.setScrollFactor(0).setDepth(1000);
+  }
+
+  createTeamPieMenu() {
+    if (this.teamPieMenu) this.teamPieMenu.destroy();
+    if (this.teamSwitchTexts) this.teamSwitchTexts.forEach(t => t.destroy());
+    if (this.teamPieHits) this.teamPieHits.forEach(h => h.destroy());
+    this.teamPieMenu = this.add.graphics();
+    this.teamSwitchTexts = [];
+    this.teamPieHits = [];
+    const centerX = 120, centerY = 120, radius = 90;
+    const teams = [
+      { name: 'Red', color: 0xff0000, score: this.team1Score || 0, key: 'red' },
+      { name: 'Blue', color: 0x0078ff, score: this.team2Score || 0, key: 'blue' },
+      { name: 'Yellow', color: 0xffdc00, score: this.team3Score || 0, key: 'yellow' },
+      { name: 'Green', color: 0x00c800, score: this.team4Score || 0, key: 'green' },
+    ];
+    const anglePer = (2 * Math.PI) / teams.length;
+    teams.forEach((team, i) => {
+      const startAngle = i * anglePer - Math.PI/2;
+      const endAngle = startAngle + anglePer;
+      this.teamPieMenu.beginPath();
+      this.teamPieMenu.moveTo(centerX, centerY);
+      this.teamPieMenu.arc(centerX, centerY, radius, startAngle, endAngle, false);
+      this.teamPieMenu.closePath();
+      this.teamPieMenu.fillStyle(team.color, this.playerTeam === team.key ? 1 : 0.7);
+      this.teamPieMenu.fillPath();
+      // Add team name and score text
+      const midAngle = (startAngle + endAngle) / 2;
+      const textX = centerX + Math.cos(midAngle) * (radius * 0.65);
+      const textY = centerY + Math.sin(midAngle) * (radius * 0.65);
+      const t = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
+        font: 'bold 18px Arial',
+        fill: '#fff',
+        align: 'center',
+        stroke: '#000',
+        strokeThickness: 3
+      }).setOrigin(0.5).setDepth(1001);
+      this.teamSwitchTexts.push(t);
+      // Add interactive area for switching
+      const hit = this.add.zone(centerX, centerY, radius*2, radius*2).setOrigin(0.5).setInteractive();
+      hit.on('pointerdown', pointer => {
+        // Check if pointer is in this slice
+        const dx = pointer.x - centerX;
+        const dy = pointer.y - centerY;
+        const angle = Math.atan2(dy, dx);
+        let a = angle < -Math.PI/2 ? angle + 2*Math.PI : angle;
+        if (a >= startAngle && a < endAngle) {
+          if (this.playerTeam !== team.key) {
+            this.showTeamSwitchConfirm(team.key, team.name);
+          }
+        }
+      });
+      hit.setDepth(1000);
+      this.teamPieHits.push(hit);
+    });
+    this.teamPieMenu.setDepth(999);
+  };
+
+  // 3. Add confirmation dialog for team switching
+  showTeamSwitchConfirm(teamKey, teamName) {
+    if (this.teamSwitchDialog) this.teamSwitchDialog.destroy();
+    if (this.teamSwitchText) this.teamSwitchText.destroy();
+    if (this.teamSwitchYes) this.teamSwitchYes.destroy();
+    if (this.teamSwitchNo) this.teamSwitchNo.destroy();
+    const w = 220, h = 110;
+    const x = 120, y = 120;
+    this.teamSwitchDialog = this.add.rectangle(x, y, w, h, 0x222222, 0.95).setOrigin(0.5).setDepth(2000);
+    this.teamSwitchText = this.add.text(x, y-20, `Switch to ${teamName} team?`, {
+      font: 'bold 18px Arial', fill: '#fff', align: 'center'
+    }).setOrigin(0.5).setDepth(2001);
+    this.teamSwitchYes = this.add.text(x-40, y+20, 'Yes', {
+      font: 'bold 20px Arial', fill: '#0f0', backgroundColor: '#222', padding: { left: 10, right: 10, top: 4, bottom: 4 }
+    }).setOrigin(0.5).setInteractive().setDepth(2001);
+    this.teamSwitchNo = this.add.text(x+40, y+20, 'No', {
+      font: 'bold 20px Arial', fill: '#f00', backgroundColor: '#222', padding: { left: 10, right: 10, top: 4, bottom: 4 }
+    }).setOrigin(0.5).setInteractive().setDepth(2001);
+    this.teamSwitchYes.on('pointerdown', () => {
+      this.switchTeam(teamKey);
+      this.hideTeamSwitchConfirm();
+    });
+    this.teamSwitchNo.on('pointerdown', () => {
+      this.hideTeamSwitchConfirm();
+    });
+  };
+  hideTeamSwitchConfirm() {
+    if (this.teamSwitchDialog) this.teamSwitchDialog.destroy();
+    if (this.teamSwitchText) this.teamSwitchText.destroy();
+    if (this.teamSwitchYes) this.teamSwitchYes.destroy();
+    if (this.teamSwitchNo) this.teamSwitchNo.destroy();
+  };
 }
   
 const config = {
@@ -3622,3 +3889,18 @@ if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(naviga
 }
 
 const game = new Phaser.Game(config);
+
+// After the class MainScene { ... } ends
+
+// Patch updateScoreDisplay and updateTeamDisplay to call createTeamPieMenu
+const oldUpdateScoreDisplay = MainScene.prototype.updateScoreDisplay;
+MainScene.prototype.updateScoreDisplay = function() {
+  if (oldUpdateScoreDisplay) oldUpdateScoreDisplay.call(this);
+  this.createTeamPieMenu();
+};
+
+const oldUpdateTeamDisplay = MainScene.prototype.updateTeamDisplay;
+MainScene.prototype.updateTeamDisplay = function(team) {
+  if (oldUpdateTeamDisplay) oldUpdateTeamDisplay.call(this, team);
+  this.createTeamPieMenu();
+};
