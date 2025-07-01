@@ -8,7 +8,7 @@ pub const SHIP_WIDTH: f32 = 40.0;
 pub const SHIP_HEIGHT: f32 = 40.0;
 pub const BALL_WIDTH: f32 = 20.0;
 pub const BALL_HEIGHT: f32 = 20.0;
-pub const WALL_COLLISION_INSET: f32 = 5.0;
+pub const WALL_COLLISION_INSET: f32 = 0.0;
 
 pub fn aabb_collision(x1: f32, y1: f32, w1: f32, h1: f32, x2: f32, y2: f32, w2: f32, h2: f32) -> bool {
     x1 < x2 + w2 && x1 + w1 > x2 &&
@@ -52,8 +52,8 @@ pub fn resolve_rect_collision(ball: &mut Ball, wall: &MapObject) {
             0.95 // Minimal dampening for slow balls
         };
         
-        // Add a small buffer to prevent the ball from getting stuck in walls
-        let buffer = 1.0;
+        // Use a very small buffer to minimize visual gap while preventing stuck ball
+        let buffer = 0.1; // Tiny buffer to just barely separate ball from wall
         
         if overlap_x < overlap_y {
             // Horizontal collision

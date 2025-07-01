@@ -8,12 +8,12 @@ use serde::{Serialize, Deserialize};
 use crate::ball::{Ball, BALL_WIDTH, BALL_HEIGHT};
 use crate::player::{Player, ShipState, Team};
 use crate::collision::{resolve_ship_collision};
-use chrono::Utc;
+// use chrono::Utc; // Unused import removed
 use serde_json::json;
 use warp::ws::{Message, WebSocket};
 use futures::stream::SplitSink;
-use futures::SinkExt;
 use rand;
+use crate::dual_connection::{MessageType};
 
 #[derive(Debug)]
 pub struct InputState {
@@ -88,6 +88,8 @@ pub struct GameStateSnapshot {
     projectiles: Vec<Projectile>, // Add projectiles to the game state
     team1_score: u32, // Red team score
     team2_score: u32, // Blue team score
+    team3_score: u32, // Yellow team score
+    team4_score: u32, // Green team score
 }
 
 pub struct Game {
@@ -97,9 +99,13 @@ pub struct Game {
     pub next_id: u32,
     pub team1_score: u32, // Red team score
     pub team2_score: u32, // Blue team score
+    pub team3_score: u32, // Yellow team score  
+    pub team4_score: u32, // Green team score
     pub goal_cooldown: f32, // Add cooldown after a goal is scored
     pub red_team_count: u32, // Count of players in red team
     pub blue_team_count: u32, // Count of players in blue team
+    pub yellow_team_count: u32, // Count of players in yellow team
+    pub green_team_count: u32, // Count of players in green team
     pub projectiles: Vec<Projectile>, // Add projectiles list
     pub next_projectile_id: u32, // Track projectile IDs
 }
@@ -124,15 +130,21 @@ impl Game {
                 owner: None,
                 last_shooter: None,
                 shot_clock: 10.0, // Initialize shot clock
+                pickup_cooldown: 0.0, // Initialize pickup cooldown
+                exclusive_team: None, // No team restriction initially
             },
             players: HashMap::new(),
             clients: HashMap::new(),
             next_id: 1,
             team1_score: 0,
             team2_score: 0,
+            team3_score: 0,
+            team4_score: 0,
             goal_cooldown: 0.0,
             red_team_count: 0,
             blue_team_count: 0,
+            yellow_team_count: 0,
+            green_team_count: 0,
             projectiles: Vec::new(),
             next_projectile_id: 1,
         }
@@ -140,13 +152,95 @@ impl Game {
     
     // Add a method to determine which team a new player should join
     pub fn assign_team(&mut self) -> Team {
-        if self.red_team_count <= self.blue_team_count {
-            self.red_team_count += 1;
-            Team::Red
-        } else {
-            self.blue_team_count += 1;
-            Team::Blue
+        // For corner defense mode: limit to 1 player per team
+        let max_players_per_team = 1;
+        
+        let team_counts = [
+            (Team::Red, self.red_team_count),
+            (Team::Blue, self.blue_team_count),
+            (Team::Yellow, self.yellow_team_count),
+            (Team::Green, self.green_team_count),
+        ];
+        
+        // Find team with lowest count that hasn't reached the limit
+        let available_teams: Vec<_> = team_counts.iter()
+            .filter(|(_, count)| *count < max_players_per_team)
+            .collect();
+        
+        if available_teams.is_empty() {
+            // All teams are full, assign to Red as fallback (should not happen in corner defense)
+            println!("Warning: All teams are full, assigning to Red team");
+            return Team::Red;
         }
+        
+        // Find team with lowest count among available teams
+        let (team, _) = available_teams.iter()
+            .min_by_key(|(_, count)| *count)
+            .map(|(team, _)| (*team, 0u32))
+            .unwrap_or((Team::Red, 0u32));
+        
+        // Increment the appropriate counter
+        match team {
+            Team::Red => self.red_team_count += 1,
+            Team::Blue => self.blue_team_count += 1,
+            Team::Yellow => self.yellow_team_count += 1,
+            Team::Green => self.green_team_count += 1,
+        }
+        
+        team
+    }
+    
+    // Add method to check if a team can accept new players
+    pub fn can_join_team(&self, team: Team) -> bool {
+        let max_players_per_team = 1; // For corner defense mode
+        
+        let current_count = match team {
+            Team::Red => self.red_team_count,
+            Team::Blue => self.blue_team_count,
+            Team::Yellow => self.yellow_team_count,
+            Team::Green => self.green_team_count,
+        };
+        
+        let can_join = current_count < max_players_per_team;
+        
+        println!("can_join_team check: {:?} team has {} players (max: {}), can join: {}", 
+                 team, current_count, max_players_per_team, can_join);
+        
+        // Also count actual players in this team for verification
+        let actual_count = self.players.values()
+            .filter(|player| player.team == team)
+            .count();
+        
+        println!("Verification: {:?} team actually has {} players in game", team, actual_count);
+        
+        if current_count as usize != actual_count {
+            println!("WARNING: Team count mismatch! Stored count: {}, Actual count: {}", 
+                     current_count, actual_count);
+        }
+        
+        can_join
+    }
+    
+    // Add method to recalculate team counts from actual players (to fix any sync issues)
+    pub fn recalculate_team_counts(&mut self) {
+        // Reset all counts
+        self.red_team_count = 0;
+        self.blue_team_count = 0;
+        self.yellow_team_count = 0;
+        self.green_team_count = 0;
+        
+        // Count players by team
+        for (_, player) in &self.players {
+            match player.team {
+                Team::Red => self.red_team_count += 1,
+                Team::Blue => self.blue_team_count += 1,
+                Team::Yellow => self.yellow_team_count += 1,
+                Team::Green => self.green_team_count += 1,
+            }
+        }
+        
+        println!("Recalculated team counts - Red: {}, Blue: {}, Yellow: {}, Green: {}", 
+                 self.red_team_count, self.blue_team_count, self.yellow_team_count, self.green_team_count);
     }
     
     // Update player removal to account for team counts
@@ -155,18 +249,47 @@ impl Game {
             match player.team {
                 Team::Red => self.red_team_count = self.red_team_count.saturating_sub(1),
                 Team::Blue => self.blue_team_count = self.blue_team_count.saturating_sub(1),
+                Team::Yellow => self.yellow_team_count = self.yellow_team_count.saturating_sub(1),
+                Team::Green => self.green_team_count = self.green_team_count.saturating_sub(1),
             }
         }
         self.players.remove(&player_id);
         self.clients.remove(&player_id);
     }
 
-    pub fn update(&mut self, fixed_dt: f32, game_width: f32, game_height: f32) {
+    // Helper function to broadcast event messages to all players
+    fn broadcast_event(&self, dual_mgr: Option<Arc<crate::dual_connection::DualConnectionManager>>, message_type: MessageType, data: serde_json::Value) {
+        if let Some(mgr) = dual_mgr {
+            for &client_id in self.players.keys() {
+                let msg_type = message_type.clone();
+                let msg_data = data.clone();
+                let mgr_clone = mgr.clone(); // Clone mgr for each iteration
+                tokio::spawn(async move {
+                    let _ = mgr_clone.send_to_client(client_id, msg_type, msg_data).await;
+                });
+            }
+        }
+    }
+
+    pub fn update(&mut self, fixed_dt: f32, game_width: f32, game_height: f32, dual_mgr: Option<Arc<crate::dual_connection::DualConnectionManager>>) {
         // Update cooldowns (remove ball grab cooldown update)
         // Update goal cooldown
         if self.goal_cooldown > 0.0 {
             self.goal_cooldown -= fixed_dt;
             if self.goal_cooldown < 0.0 { self.goal_cooldown = 0.0; }
+        }
+        
+        // Update ball pickup cooldown
+        if self.ball.pickup_cooldown > 0.0 {
+            self.ball.pickup_cooldown -= fixed_dt;
+            if self.ball.pickup_cooldown < 0.0 { 
+                self.ball.pickup_cooldown = 0.0;
+                if let Some(ref team) = self.ball.exclusive_team {
+                    println!("Ball glow ended - now only {} team can grab it", team);
+                }
+                // Keep team restriction active even after cooldown expires
+                // It will only be cleared when the ball is grabbed by the exclusive team
+            }
         }
         
         // Update player cooldowns
@@ -268,6 +391,10 @@ impl Game {
 
                         // Set the last shooter and apply cooldown to prevent immediate grabbing
                         self.ball.last_shooter = Some(owner_id);
+                        
+                        // Collect events to broadcast after mutable borrow ends
+                        let mut shot_confirmation_opt = None;
+                        
                         // Apply grab cooldown only to the shooter
                         if let Some(player_mut) = self.players.get_mut(&owner_id) {
                             player_mut.grab_cooldown = 0.3; // Increased to prevent tunneling through ships
@@ -275,12 +402,32 @@ impl Game {
                             player_mut.velocity.0 -= (total_impulse.0 / ship_mass) * recoil_factor;
                             player_mut.velocity.1 -= (total_impulse.1 / ship_mass) * recoil_factor;
                             player_mut.shoot_cooldown = 0.25;
-                            // Reset the shoot flag to prevent continuous shooting
+                            
+                            // Prepare confirmation for reliable shots
+                            if let Some(shot_id) = player_mut.pending_shot_id.take() {
+                                shot_confirmation_opt = Some(json!({
+                                    "type": "shot_processed",
+                                    "shot_id": shot_id,
+                                    "player_id": owner_id,
+                                    "ball_velocity": {
+                                        "x": self.ball.vx,
+                                        "y": self.ball.vy
+                                    },
+                                    "timestamp": chrono::Utc::now().timestamp_millis() as u64
+                                }));
+                            }
+                            
+                            // Reset the shoot flag AFTER processing to prevent double-shooting
                             player_mut.input.shoot = false;
-                            println!("Reset shoot flag for player {}", owner_id);
+                            println!("Reset shoot flag for player {} after processing", owner_id);
                         }
 
                         self.ball.release(owner_id);
+                        
+                        // Send confirmation after mutable borrow ends
+                        if let Some(shot_confirmation) = shot_confirmation_opt {
+                            self.broadcast_event(dual_mgr.clone(), MessageType::BallShot, shot_confirmation);
+                        }
                         
                         // Send a message to all clients about the auto-shoot
                         let auto_shoot_event = json!({
@@ -288,14 +435,7 @@ impl Game {
                             "player_id": owner_id
                         });
                         
-                        let auto_shoot_str = auto_shoot_event.to_string();
-                        for (_id, sender) in self.clients.iter_mut() {
-                            let msg = auto_shoot_str.clone();
-                            let sender = Arc::clone(sender);
-                            tokio::spawn(async move {
-                                let _ = sender.lock().await.send(Message::text(msg)).await;
-                            });
-                        }
+                        self.broadcast_event(dual_mgr.clone(), MessageType::AutoShoot, auto_shoot_event);
                     }
                 }
             }
@@ -311,6 +451,7 @@ impl Game {
         // Update players' ships
         let ball_grabbed = self.ball.grabbed;
         let ball_owner = self.ball.owner;
+        let mut events_to_broadcast = Vec::new();
         for player in self.players.values_mut() {
             let slowdown = if ball_grabbed && ball_owner == Some(player.id) { 0.8 } else { 1.0 };
             let acceleration = 200.0 * slowdown;
@@ -355,24 +496,19 @@ impl Game {
             if player.input.boost && player.rocket_cooldown <= 0.0 {
                 println!("Player {} is attempting to fire a rocket. Cooldown: {}", player.id, player.rocket_cooldown);
                 
-                // Use the player's velocity direction for shooting rockets (like the old ball shooting)
-                let mut dx = player.velocity.0;
-                let mut dy = player.velocity.1;
-                let mut mag = (dx * dx + dy * dy).sqrt();
+                // Get aim direction from target coordinates (like ball shooting)
+                let mut dx = 0.0;
+                let mut dy = -1.0; // Default upward direction
+                let mut mag = 1.0;
                 
-                // If player is not moving, use the target coordinates as fallback
-                if mag < 1.0 {
-                    if let (Some(target_x), Some(target_y)) = (player.input.target_x, player.input.target_y) {
-                        dx = target_x - player.ship.x;
-                        dy = target_y - player.ship.y;
-                        mag = (dx * dx + dy * dy).sqrt();
-                    } else {
-                        // If no target coordinates, default to shooting upward
-                        dx = 0.0;
-                        dy = -1.0;
-                        mag = 1.0;
-                        println!("Using default upward direction for rocket");
-                    }
+                // Use target coordinates for direction
+                if let (Some(target_x), Some(target_y)) = (player.input.target_x, player.input.target_y) {
+                    dx = target_x - player.ship.x;
+                    dy = target_y - player.ship.y;
+                    mag = (dx * dx + dy * dy).sqrt();
+                    println!("Using target coordinates for rocket direction: ({}, {}), magnitude: {}", dx, dy, mag);
+                } else {
+                    println!("No target coordinates, using default upward direction for rocket");
                 }
                 
                 if mag > 0.0 {
@@ -381,12 +517,12 @@ impl Game {
                     let dir_y = dy / mag;
                     
                     // Calculate projectile velocity (constant speed)
-                    let projectile_speed = 125.0; // Half the previous speed (was 250.0)
+                    let projectile_speed = 125.0;
                     let vx = dir_x * projectile_speed;
                     let vy = dir_y * projectile_speed;
                     
-                    // Add player's velocity to projectile
-                    let total_vx = vx + player.velocity.0 * 0.5; // Reduced influence of player velocity
+                    // Add a portion of player's velocity to projectile
+                    let total_vx = vx + player.velocity.0 * 0.5;
                     let total_vy = vy + player.velocity.1 * 0.5;
                     
                     // Position the projectile just outside the ship's radius
@@ -422,28 +558,75 @@ impl Game {
                     player.velocity.0 -= dir_x * projectile_speed * recoil_factor;
                     player.velocity.1 -= dir_y * projectile_speed * recoil_factor;
                     
-                    // Send a message to all clients about the projectile
+                    // Collect event to broadcast after mutable borrow ends
                     let projectile_event = json!({
                         "type": "projectile_fired",
-                        "player_id": player.id
+                        "player_id": player.id,
+                        "projectile": {
+                            "id": self.next_projectile_id - 1,
+                            "x": projectile_x,
+                            "y": projectile_y,
+                            "vx": total_vx,
+                            "vy": total_vy,
+                            "owner_id": player.id,
+                            "lifetime": 3.0
+                        }
                     });
                     
-                    let projectile_str = projectile_event.to_string();
-                    for (_id, sender) in self.clients.iter_mut() {
-                        let msg = projectile_str.clone();
-                        let sender = Arc::clone(sender);
-                        tokio::spawn(async move {
-                            let _ = sender.lock().await.send(Message::text(msg)).await;
-                        });
-                    }
+                    events_to_broadcast.push((MessageType::ProjectileUpdate, projectile_event)); // Changed to ProjectileUpdate for fast channel
                 }
             }
+        }
+        
+        // Broadcast collected events after mutable borrow ends
+        for (msg_type, event_data) in events_to_broadcast {
+            self.broadcast_event(dual_mgr.clone(), msg_type, event_data);
         }
 
         // Ship-Wall Collision Resolution
         for player in self.players.values_mut() {
             for wall in crate::game::MAP_OBJECTS.iter().filter(|w| w.obj_type == "wall") {
                 resolve_ship_collision(&mut player.ship, &mut player.velocity, wall);
+            }
+        }
+
+        // CORNERDEFENSE AUTO-SHOOTING: Server-side auto-shooting for maximum responsiveness
+        let is_cornerdefense_map = false; // Using corner.json - disable auto-shooting for soccer
+        
+        if is_cornerdefense_map && self.ball.grabbed {
+            if let Some(owner_id) = self.ball.owner {
+                if let Some(player) = self.players.get(&owner_id) {
+                    println!("AUTO-SHOOT DEBUG: Player {} has ball, cooldown: {:.3}, target: ({:?}, {:?})", 
+                            owner_id, player.shoot_cooldown, player.input.target_x, player.input.target_y);
+                    
+                    // Auto-shoot if player has target coordinates (remove cooldown check for now)
+                    if let (Some(target_x), Some(target_y)) = (player.input.target_x, player.input.target_y) {
+                        let dx = target_x - player.ship.x;
+                        let dy = target_y - player.ship.y;
+                        let distance = (dx * dx + dy * dy).sqrt();
+                        
+                        println!("AUTO-SHOOT DEBUG: Distance to target: {:.1}", distance);
+                        
+                        // Auto-shoot if mouse is far enough away (minimum distance check)
+                        if distance > 30.0 && player.shoot_cooldown <= 0.0 {
+                            println!("🔥 SERVER AUTO-SHOOTING for player {} at target ({:.1}, {:.1}), distance: {:.1}", 
+                                    owner_id, target_x, target_y, distance);
+                            
+                                                            // Trigger shooting by setting the shoot flag
+                                if let Some(player_mut) = self.players.get_mut(&owner_id) {
+                                    player_mut.input.shoot = true;
+                                    // Override the shoot cooldown for ultra-fast auto-shooting
+                                    player_mut.shoot_cooldown = 0.0; // Reset cooldown immediately for next auto-shot
+                                }
+                        } else if distance <= 30.0 {
+                            println!("AUTO-SHOOT DEBUG: Target too close ({:.1} <= 30.0)", distance);
+                        } else if player.shoot_cooldown > 0.0 {
+                            println!("AUTO-SHOOT DEBUG: Still in cooldown ({:.3})", player.shoot_cooldown);
+                        }
+                    } else {
+                        println!("AUTO-SHOOT DEBUG: No target coordinates available");
+                    }
+                }
             }
         }
 
@@ -516,6 +699,10 @@ impl Game {
 
                         // Set the last shooter and apply cooldown to prevent immediate grabbing
                         self.ball.last_shooter = Some(owner_id);
+                        
+                        // Collect events to broadcast after mutable borrow ends
+                        let mut shot_confirmation_opt = None;
+                        
                         // Apply grab cooldown only to the shooter
                         if let Some(player_mut) = self.players.get_mut(&owner_id) {
                             player_mut.grab_cooldown = 0.3; // Increased to prevent tunneling through ships
@@ -523,12 +710,32 @@ impl Game {
                             player_mut.velocity.0 -= (total_impulse.0 / ship_mass) * recoil_factor;
                             player_mut.velocity.1 -= (total_impulse.1 / ship_mass) * recoil_factor;
                             player_mut.shoot_cooldown = 0.25;
-                            // Reset the shoot flag to prevent continuous shooting
+                            
+                            // Prepare confirmation for reliable shots
+                            if let Some(shot_id) = player_mut.pending_shot_id.take() {
+                                shot_confirmation_opt = Some(json!({
+                                    "type": "shot_processed",
+                                    "shot_id": shot_id,
+                                    "player_id": owner_id,
+                                    "ball_velocity": {
+                                        "x": self.ball.vx,
+                                        "y": self.ball.vy
+                                    },
+                                    "timestamp": chrono::Utc::now().timestamp_millis() as u64
+                                }));
+                            }
+                            
+                            // Reset the shoot flag AFTER processing to prevent double-shooting
                             player_mut.input.shoot = false;
-                            println!("Reset shoot flag for player {}", owner_id);
+                            println!("Reset shoot flag for player {} after processing", owner_id);
                         }
 
                         self.ball.release(owner_id);
+                        
+                        // Send confirmation after mutable borrow ends
+                        if let Some(shot_confirmation) = shot_confirmation_opt {
+                            self.broadcast_event(dual_mgr.clone(), MessageType::BallShot, shot_confirmation);
+                        }
                         
                         // Send a message to all clients about the shot
                         let shoot_event = json!({
@@ -536,14 +743,7 @@ impl Game {
                             "player_id": owner_id
                         });
                         
-                        let shoot_str = shoot_event.to_string();
-                        for (_id, sender) in self.clients.iter_mut() {
-                            let msg = shoot_str.clone();
-                            let sender = Arc::clone(sender);
-                            tokio::spawn(async move {
-                                let _ = sender.lock().await.send(Message::text(msg)).await;
-                            });
-                        }
+                        self.broadcast_event(dual_mgr.clone(), MessageType::BallShot, shoot_event);
                     }
                 }
             }
@@ -644,14 +844,7 @@ impl Game {
                                     "player_id": owner_id
                                 });
                                 
-                                let knock_str = knock_event.to_string();
-                                for (_id, sender) in self.clients.iter_mut() {
-                                    let msg = knock_str.clone();
-                                    let sender = Arc::clone(sender);
-                                    tokio::spawn(async move {
-                                        let _ = sender.lock().await.send(Message::text(msg)).await;
-                                    });
-                                }
+                                self.broadcast_event(dual_mgr.clone(), MessageType::BallKnocked, knock_event);
                             }
                         }
                     }
@@ -715,6 +908,23 @@ impl Game {
                         continue;
                     }
                     
+                    // Check if ball is in pickup cooldown
+                    if self.ball.pickup_cooldown > 0.0 {
+                        continue; // No one can pick up the ball during cooldown (reduced logging)
+                    }
+                    
+                    // Check if ball has team restriction
+                    if let Some(ref exclusive_team) = self.ball.exclusive_team {
+                        let player_team_str = format!("{:?}", player.team);
+                        if player_team_str != *exclusive_team {
+                            // Only log when someone tries to grab but can't (reduced spam)
+                            continue; // Only the exclusive team can pick up the ball
+                        } else {
+                            println!("Player {} ({} team) can grab ball (exclusive access)", 
+                                player.id, player_team_str);
+                        }
+                    }
+                    
                     let dx = player.ship.x - self.ball.x;
                     let dy = player.ship.y - self.ball.y;
                     let dist2 = dx * dx + dy * dy;
@@ -741,8 +951,14 @@ impl Game {
                 }
                 
                 if let Some(player_id) = closest_id {
-                    println!("Ball grabbed during physics sub-step!");
+                    if let Some(player) = self.players.get(&player_id) {
+                        println!("Ball grabbed by player {} ({:?} team)", player_id, player.team);
+                    }
                     self.ball.grab(player_id, new_x, new_y);
+                    
+                    // Clear exclusive team restriction when ball is successfully grabbed (this will reset ball color on client)
+                    self.ball.exclusive_team = None;
+                    
                     break; // Exit the sub-step loop early since the ball is now grabbed
                 }
             }
@@ -795,7 +1011,7 @@ impl Game {
             
             // Check for goal collision if not in cooldown
             if self.goal_cooldown <= 0.0 && !self.ball.grabbed {
-                self.check_goal_collision(game_width, game_height);
+                self.check_goal_collision(game_width, game_height, dual_mgr.clone());
             }
         }
 
@@ -885,7 +1101,7 @@ impl Game {
         for &index in projectiles_to_explode.iter() {
             if index < self.projectiles.len() {
                 let projectile = &self.projectiles[index];
-                self.create_explosion(projectile.x, projectile.y, projectile.owner_id);
+                                    self.create_explosion(projectile.x, projectile.y, projectile.owner_id, dual_mgr.clone());
                 self.projectiles[index].active = false;
             }
         }
@@ -893,45 +1109,18 @@ impl Game {
         // Remove inactive projectiles
         self.projectiles.retain(|p| p.active);
 
-        // Build and broadcast game state
-        let now = Utc::now().timestamp_millis() as u64;
-        let mut players_snapshot = HashMap::new();
-        for (id, player) in self.players.iter() {
-            players_snapshot.insert(*id, ShipState {
-                x: player.ship.x,
-                y: player.ship.y,
-                seq: player.last_seq,
-                boost: player.boost,
-                team: player.team,
-                display_name: player.display_name.clone(),
-                rocket_cooldown: player.rocket_cooldown,
-            });
-        }
-        let snapshot = json!(GameStateSnapshot {
-            time: now,
-            players: players_snapshot,
-            ball: self.ball.clone(),
-            projectiles: self.projectiles.clone(),
-            team1_score: self.team1_score,
-            team2_score: self.team2_score,
-        });
-        let snapshot_str = snapshot.to_string();
-        for (_id, sender) in self.clients.iter_mut() {
-            let msg = snapshot_str.clone();
-            let sender = Arc::clone(sender);
-            tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(0)).await;
-                let _ = sender.lock().await.send(Message::text(msg)).await;
-            });
-        }
+        // Note: Game state broadcasting is now handled by the game loop via DualConnectionManager
     }
     
     // Add a method to check for goal collisions
-    fn check_goal_collision(&mut self, _game_width: f32, _game_height: f32) {
+    fn check_goal_collision(&mut self, _game_width: f32, _game_height: f32, dual_mgr: Option<Arc<crate::dual_connection::DualConnectionManager>>) {
         let ball_left = self.ball.x - BALL_WIDTH / 2.0;
         let ball_right = self.ball.x + BALL_WIDTH / 2.0;
         let ball_top = self.ball.y - BALL_HEIGHT / 2.0;
         let ball_bottom = self.ball.y + BALL_HEIGHT / 2.0;
+        
+        // Debug: Log ball bounds (commented out to reduce spam)
+        // println!("Ball bounds: left={:.1}, right={:.1}, top={:.1}, bottom={:.1}", ball_left, ball_right, ball_top, ball_bottom);
         
         // Determine the middle Y position to distinguish north from south goals
         let mut min_y = f32::INFINITY;
@@ -940,7 +1129,7 @@ impl Game {
         let mut max_x = f32::NEG_INFINITY;
         
         // Find the min and max coordinates of all goals
-        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
+        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type.starts_with("goal_")) {
             min_y = min_y.min(goal.y);
             max_y = max_y.max(goal.y + goal.height);
             min_x = min_x.min(goal.x);
@@ -951,62 +1140,83 @@ impl Game {
         let middle_y = (min_y + max_y) / 2.0;
         let middle_x = (min_x + max_x) / 2.0;
         
-        println!("Ball position: ({}, {})", self.ball.x, self.ball.y);
-        println!("Goal Y range: {} to {}, middle: {}", min_y, max_y, middle_y);
+        // println!("Ball position: ({}, {})", self.ball.x, self.ball.y);
+        // println!("Goal Y range: {} to {}, middle: {}", min_y, max_y, middle_y);
         
         // Check if ball is in a goal area
-        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
-            // Debug log goal position
-            println!("Checking goal at ({}, {}), size: {}x{}", goal.x, goal.y, goal.width, goal.height);
-            
-            if ball_right > goal.x && ball_left < goal.x + goal.width &&
-               ball_bottom > goal.y && ball_top < goal.y + goal.height {
-                
-                println!("Ball entered goal at ({}, {})", goal.x, goal.y);
-                
-                // Determine which team scored based on goal position
-                // North goals (y < middle_y) are Red team's goals, South goals are Blue team's goals
-                if goal.y < middle_y {
-                    // Ball in north (Red) goal - Blue team scores
-                    self.team2_score += 1;
-                    println!("Blue team scored! Score: Red {} - Blue {}", self.team1_score, self.team2_score);
-                } else {
-                    // Ball in south (Blue) goal - Red team scores
-                    self.team1_score += 1;
-                    println!("Red team scored! Score: Red {} - Blue {}", self.team1_score, self.team2_score);
-                }
-                
-                // Reset ball position to exact middle between goals
-                self.ball.x = middle_x;
-                self.ball.y = middle_y;
-                self.ball.vx = 0.0;
-                self.ball.vy = 0.0;
-                self.ball.grabbed = false;
-                self.ball.owner = None;
-                self.ball.last_shooter = None;
-                
-                // Set cooldown to prevent immediate scoring after reset
-                self.goal_cooldown = 2.0;
-                
-                // Send a goal event to all clients
-                let goal_event = json!({
-                    "type": "goal",
-                    "team1_score": self.team1_score,
-                    "team2_score": self.team2_score,
-                    "scorer_team": if goal.y < middle_y { "blue" } else { "red" }
-                });
-                
-                let goal_str = goal_event.to_string();
-                for (_id, sender) in self.clients.iter_mut() {
-                    let msg = goal_str.clone();
-                    let sender = Arc::clone(sender);
-                    tokio::spawn(async move {
-                        let _ = sender.lock().await.send(Message::text(msg)).await;
+        if self.goal_cooldown <= 0.0 {
+            for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type.starts_with("goal_")) {
+                // Add debug print for each goal (commented out to reduce spam)
+                // println!("Checking goal: type={}, x={}, y={}, w={}, h={}", goal.obj_type, goal.x, goal.y, goal.width, goal.height);
+                // Add a small margin to the collision check
+                let margin = 1.0;
+                if ball_right >= goal.x - margin && ball_left <= goal.x + goal.width + margin &&
+                   ball_bottom >= goal.y - margin && ball_top <= goal.y + goal.height + margin {
+                    println!("GOAL SCORED! Ball hit {} goal", goal.obj_type);
+                    
+                    // Determine which team was scored on based on the goal type
+                    let scored_on_team = match goal.obj_type.as_str() {
+                        "goal_red" => Team::Red,      // Red goal hit = Red team scored on
+                        "goal_blue" => Team::Blue,    // Blue goal hit = Blue team scored on  
+                        "goal_yellow" => Team::Yellow, // Yellow goal hit = Yellow team scored on
+                        "goal_green" => Team::Green,  // Green goal hit = Green team scored on
+                        _ => continue, // Skip if not a valid goal type
+                    };
+                    
+                    // Get the player who scored (last shooter)
+                    let scorer_name = if let Some(shooter_id) = self.ball.last_shooter {
+                        if let Some(player) = self.players.get(&shooter_id) {
+                            player.display_name.clone()
+                        } else {
+                            "Unknown Player".to_string()
+                        }
+                    } else {
+                        "Unknown Player".to_string()
+                    };
+                    
+                    // Update scores based on which team was scored on (they lose a point in this context, but we track goals scored against them)
+                    // In corner defense, when your goal is hit, the other teams get points
+                    // For simplicity, we'll just increment a general score counter
+                    match scored_on_team {
+                        Team::Red => self.team1_score += 1,      // Point scored against red
+                        Team::Blue => self.team2_score += 1,     // Point scored against blue
+                        Team::Yellow => self.team3_score += 1,   // Point scored against yellow
+                        Team::Green => self.team4_score += 1,    // Point scored against green
+                    }
+                    
+                    // Reset ball position and state
+                    self.ball.x = middle_x;
+                    self.ball.y = middle_y;
+                    self.ball.vx = 0.0;
+                    self.ball.vy = 0.0;
+                    self.ball.grabbed = false;
+                    self.ball.owner = None;
+                    self.ball.grab_cooldown = 0.5;
+                    self.goal_cooldown = 2.0;
+                    
+                    // Set pickup cooldown and team restriction
+                    self.ball.pickup_cooldown = 3.0; // 3 second cooldown
+                    self.ball.exclusive_team = Some(format!("{:?}", scored_on_team)); // Team that was scored on gets exclusive pickup
+                    
+                    println!("Ball glowing for 3s, then exclusive to {:?} team", scored_on_team);
+                    
+                    // Send goal event to all clients
+                    let goal_event = json!({
+                        "type": "goal",
+                        "scored_on_team": format!("{:?}", scored_on_team),
+                        "scorer_name": scorer_name,
+                        "team1_score": self.team1_score,
+                        "team2_score": self.team2_score,
+                        "team3_score": self.team3_score,
+                        "team4_score": self.team4_score,
+                        "ball_exclusive_team": format!("{:?}", scored_on_team)
                     });
+                    
+                    println!("Sending goal message to {} clients", self.players.len());
+                    self.broadcast_event(dual_mgr.clone(), MessageType::Goal, goal_event);
+                    
+                    break;
                 }
-                
-                // Only count one goal at a time
-                break;
             }
         }
     }
@@ -1032,18 +1242,18 @@ impl Game {
             projectiles: self.projectiles.clone(),
             team1_score: self.team1_score,
             team2_score: self.team2_score,
+            team3_score: self.team3_score,
+            team4_score: self.team4_score,
         }
     }
     
     // Add a method to reset the game
-    pub fn reset_game(&mut self) {
+    pub fn reset_game(&mut self, dual_mgr: Option<Arc<crate::dual_connection::DualConnectionManager>>) {
         // Reset scores
         self.team1_score = 0;
         self.team2_score = 0;
-        
-        // Calculate the middle of the game area
-        let game_width = 2000.0;
-        let game_height = 1200.0;
+        self.team3_score = 0;
+        self.team4_score = 0;
         
         // Find the min and max coordinates of all goals to determine the middle point
         // This reuses the same logic as in check_goal_collision
@@ -1053,7 +1263,7 @@ impl Game {
         let mut max_x = f32::NEG_INFINITY;
         
         // Find the min and max coordinates of all goals
-        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type == "goal") {
+        for goal in crate::game::MAP_OBJECTS.iter().filter(|obj| obj.obj_type.starts_with("goal")) {
             min_y = min_y.min(goal.y);
             max_y = max_y.max(goal.y + goal.height);
             min_x = min_x.min(goal.x);
@@ -1064,6 +1274,9 @@ impl Game {
         let middle_x = (min_x + max_x) / 2.0;
         let middle_y = (min_y + max_y) / 2.0;
         
+        println!("RESET: Goal bounds - min_x: {}, max_x: {}, min_y: {}, max_y: {}", min_x, max_x, min_y, max_y);
+        println!("RESET: Calculated middle position: ({}, {})", middle_x, middle_y);
+        
         // Reset ball position to the middle between goals
         self.ball.x = middle_x;
         self.ball.y = middle_y;
@@ -1073,6 +1286,8 @@ impl Game {
         self.ball.owner = None;
         self.ball.last_shooter = None;
         self.ball.shot_clock = 10.0;
+        self.ball.pickup_cooldown = 0.0;
+        self.ball.exclusive_team = None;
         
         // Reset player positions based on team - closer to the ball
         for (_, player) in self.players.iter_mut() {
@@ -1086,10 +1301,23 @@ impl Game {
                     // Position blue team players near the ball, slightly to the right
                     player.ship.x = middle_x + 150.0;
                     player.ship.y = middle_y + (rand::random::<f32>() - 0.5) * 100.0;
-                }
+                },
+                crate::player::Team::Yellow => {
+                    // Position yellow team players near the ball, slightly to the right
+                    player.ship.x = middle_x + 150.0;
+                    player.ship.y = middle_y + (rand::random::<f32>() - 0.5) * 100.0;
+                },
+                crate::player::Team::Green => {
+                    // Position green team players near the ball, slightly to the left
+                    player.ship.x = middle_x - 150.0;
+                    player.ship.y = middle_y + (rand::random::<f32>() - 0.5) * 100.0;
+                },
             }
             // Reset player velocity
             player.velocity = (0.0, 0.0);
+            
+            // BUGFIX: Reset sequence number to allow input after reset
+            player.last_seq = 0;
         }
         
         // Set goal cooldown to prevent immediate scoring
@@ -1099,75 +1327,66 @@ impl Game {
         let reset_event = serde_json::json!({
             "type": "game_reset",
             "team1_score": self.team1_score,
-            "team2_score": self.team2_score
+            "team2_score": self.team2_score,
+            "team3_score": self.team3_score,
+            "team4_score": self.team4_score
         });
         
-        let reset_str = reset_event.to_string();
-        for (_id, sender) in self.clients.iter_mut() {
-            let msg = reset_str.clone();
-            let sender = Arc::clone(sender);
-            tokio::spawn(async move {
-                let _ = sender.lock().await.send(Message::text(msg)).await;
-            });
-        }
+        self.broadcast_event(dual_mgr.clone(), MessageType::GameReset, reset_event);
         
         // Start countdown
-        self.start_countdown();
+        self.start_countdown(dual_mgr.clone());
         
         // Clear all projectiles
         self.projectiles.clear();
     }
     
     // Add a method to start the countdown
-    pub fn start_countdown(&self) {
-        let clients = self.clients.clone();
+    pub fn start_countdown(&self, dual_mgr: Option<Arc<crate::dual_connection::DualConnectionManager>>) {
+        // Get player IDs to broadcast to
+        let player_ids: Vec<u32> = self.players.keys().cloned().collect();
         
         // Spawn a task to handle the countdown
-        tokio::spawn(async move {
-            for count in (1..=5).rev() {
-                // Send countdown message to all clients
-                let countdown_event = serde_json::json!({
-                    "type": "countdown",
-                    "count": count
-                });
-                
-                let countdown_str = countdown_event.to_string();
-                for (_id, sender) in clients.iter() {
-                    let msg = countdown_str.clone();
-                    let sender = Arc::clone(sender);
-                    tokio::spawn(async move {
-                        let _ = sender.lock().await.send(Message::text(msg)).await;
+        if let Some(mgr) = dual_mgr {
+            tokio::spawn(async move {
+                for count in (1..=5).rev() {
+                    // Send countdown message to all clients
+                    let countdown_event = serde_json::json!({
+                        "type": "countdown",
+                        "count": count
                     });
+                    
+                    // Broadcast to all players
+                    for &client_id in &player_ids {
+                        let _ = mgr.send_to_client(client_id, MessageType::Countdown, countdown_event.clone()).await;
+                    }
+                    
+                    // Wait 1 second
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
                 
-                // Wait 1 second
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
-            
-            // Send final countdown message (0) to indicate game start
-            let start_event = serde_json::json!({
-                "type": "countdown",
-                "count": 0
-            });
-            
-            let start_str = start_event.to_string();
-            for (_id, sender) in clients.iter() {
-                let msg = start_str.clone();
-                let sender = Arc::clone(sender);
-                tokio::spawn(async move {
-                    let _ = sender.lock().await.send(Message::text(msg)).await;
+                // Send final countdown message (0) to indicate game start
+                let start_event = serde_json::json!({
+                    "type": "countdown",
+                    "count": 0
                 });
-            }
-        });
+                
+                // Broadcast game start to all players
+                for &client_id in &player_ids {
+                    let _ = mgr.send_to_client(client_id, MessageType::Countdown, start_event.clone()).await;
+                }
+            });
+        }
     }
 
     // Add a method to create an explosion effect
-    fn create_explosion(&mut self, x: f32, y: f32, owner_id: u32) {
+    fn create_explosion(&mut self, x: f32, y: f32, owner_id: u32, dual_mgr: Option<Arc<crate::dual_connection::DualConnectionManager>>) {
         // Define explosion parameters
         let explosion_radius = 100.0;
         let explosion_force = 300.0;
         
         // Apply knockback to players in range
+        let mut events_to_broadcast = Vec::new();
         for (player_id, player) in self.players.iter_mut() {
             let dx = player.ship.x - x;
             let dy = player.ship.y - y;
@@ -1201,22 +1420,20 @@ impl Game {
                     // Apply grab cooldown
                     player.grab_cooldown = 0.5;
                     
-                    // Send a message about the ball being knocked loose
+                    // Collect event to broadcast after mutable borrow ends  
                     let knock_event = json!({
                         "type": "ball_knocked",
                         "player_id": *player_id
                     });
                     
-                    let knock_str = knock_event.to_string();
-                    for (_id, sender) in self.clients.iter_mut() {
-                        let msg = knock_str.clone();
-                        let sender = Arc::clone(sender);
-                        tokio::spawn(async move {
-                            let _ = sender.lock().await.send(Message::text(msg)).await;
-                        });
-                    }
+                    events_to_broadcast.push((MessageType::BallKnocked, knock_event));
                 }
             }
+        }
+        
+        // Broadcast collected events after mutable borrow ends
+        for (msg_type, event_data) in events_to_broadcast {
+            self.broadcast_event(dual_mgr.clone(), msg_type, event_data);
         }
         
         // Apply knockback to the ball if it's not grabbed
@@ -1260,14 +1477,7 @@ impl Game {
             "player_id": owner_id
         });
         
-        let explosion_str = explosion_event.to_string();
-        for (_id, sender) in self.clients.iter_mut() {
-            let msg = explosion_str.clone();
-            let sender = Arc::clone(sender);
-            tokio::spawn(async move {
-                let _ = sender.lock().await.send(Message::text(msg)).await;
-            });
-        }
+        self.broadcast_event(dual_mgr.clone(), MessageType::Explosion, explosion_event);
     }
 
     // Helper function to safely position the ball after shooting
@@ -1325,7 +1535,7 @@ impl Game {
 
 pub static GLOBAL_GAME: Lazy<Arc<Mutex<Game>>> = Lazy::new(|| Arc::new(Mutex::new(Game::new())));
 
-pub async fn game_update_loop() {
+pub async fn game_update_loop(dual_mgr: Arc<crate::dual_connection::DualConnectionManager>) {
     let fixed_dt = 0.1;
     let sub_steps = 10;
     let _sub_dt = fixed_dt / sub_steps as f32;
@@ -1334,7 +1544,35 @@ pub async fn game_update_loop() {
     loop {
         {
             let mut game = GLOBAL_GAME.lock().await;
-            game.update(fixed_dt, game_width, game_height);
+            game.update(fixed_dt, game_width, game_height, Some(dual_mgr.clone()));
+            
+            // Send state updates via DualConnectionManager
+            let snapshot = game.create_snapshot();
+            let snapshot_json = serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null);
+            
+            // Get all connected client IDs and broadcast state
+            for &client_id in game.players.keys() {
+                let _ = dual_mgr.send_to_client(client_id, MessageType::GameState, snapshot_json.clone()).await;
+            }
+            
+            // Send projectile updates through fast channel for immediate visibility
+            if !game.projectiles.is_empty() {
+                let active_projectiles: Vec<_> = game.projectiles.iter()
+                    .filter(|p| p.active)
+                    .cloned()
+                    .collect();
+                
+                if !active_projectiles.is_empty() {
+                    let projectile_update = json!({
+                        "type": "projectile_positions",
+                        "projectiles": active_projectiles
+                    });
+                    
+                    for &client_id in game.players.keys() {
+                        let _ = dual_mgr.send_to_client(client_id, MessageType::ProjectileUpdate, projectile_update.clone()).await;
+                    }
+                }
+            }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis((fixed_dt * 700.0) as u64)).await;
     }
@@ -1342,8 +1580,8 @@ pub async fn game_update_loop() {
 
 // Load the map_data.json file at compile time.
 pub static MAP_OBJECTS: Lazy<Vec<MapObject>> = Lazy::new(|| {
-    let json_str = include_str!("../map_data.json");
-    serde_json::from_str(json_str).expect("Failed to parse map_data.json")
+    let json_str = include_str!("../soccer.json");
+    serde_json::from_str(json_str).expect("Failed to parse corner.json")
 });
 
 #[derive(Deserialize, Debug)]

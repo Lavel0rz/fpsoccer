@@ -10,6 +10,10 @@ pub enum Team {
     Red,
     #[serde(rename = "Blue")]
     Blue,
+    #[serde(rename = "Yellow")]
+    Yellow,
+    #[serde(rename = "Green")]
+    Green,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -43,10 +47,11 @@ pub struct Player {
     pub display_name: String,
     pub is_host: bool,
     pub rocket_cooldown: f32,
+    pub pending_shot_id: Option<u32>,
 }
 
 impl Player {
-    pub fn new(id: u32, team: Team) -> Self {
+    pub fn new(id: u32, team: Team, display_name: String) -> Self {
         Self {
             id,
             ship: Ship { x: 400.0, y: 300.0 },
@@ -55,11 +60,12 @@ impl Player {
             velocity: (0.0, 0.0),
             shoot_cooldown: 0.0,
             grab_cooldown: 0.0,
-            boost: 0.0,
+            boost: 200.0,
             team,
-            display_name: format!("Player {}", id),
+            display_name,
             is_host: false,
             rocket_cooldown: 0.0,
+            pending_shot_id: None,
         }
     }
     

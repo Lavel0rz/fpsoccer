@@ -104,6 +104,22 @@
       background-color: #6666ff;
     }
     
+    #join-yellow-team {
+      background-color: #ffdc00;
+    }
+    
+    #join-yellow-team:hover {
+      background-color: #ffe066;
+    }
+    
+    #join-green-team {
+      background-color: #00c800;
+    }
+    
+    #join-green-team:hover {
+      background-color: #00e800;
+    }
+    
     #start-screen {
       display: flex;
       flex-direction: column;
@@ -191,12 +207,20 @@
         content: "B";
       }
       
+      #join-yellow-team::after {
+        content: "Y";
+      }
+      
+      #join-green-team::after {
+        content: "G";
+      }
+      
       #reset-game::after {
         content: "↻";
         font-size: 1.2em;
       }
       
-      #join-red-team, #join-blue-team, #reset-game {
+      #join-red-team, #join-blue-team, #join-yellow-team, #join-green-team, #reset-game {
         text-indent: -9999px;
         line-height: 0;
       }
@@ -214,6 +238,8 @@
   <div id="team-buttons">
     <button id="join-red-team" class="team-button">Join Red Team</button>
     <button id="join-blue-team" class="team-button">Join Blue Team</button>
+    <button id="join-yellow-team" class="team-button">Join Yellow Team</button>
+    <button id="join-green-team" class="team-button">Join Green Team</button>
     <button id="reset-game" class="team-button" style="background-color: #ff9800; display: none;">Reset Game</button>
   </div>
   
@@ -507,12 +533,52 @@
       teamButtons.style.display = 'block';
       console.log('Team buttons should now be visible:', teamButtons);
       
-      // Load the game script
-      const script = document.createElement('script');
-      script.src = 'main.js';
-      document.body.appendChild(script);
+      // Load the game scripts in order
+      loadGameScripts();
     });
     
+    // Function to load game scripts in the correct order
+    function loadGameScripts() {
+      console.log('Loading game scripts...');
+      
+      // Load scripts in sequence
+      const scripts = [
+        'utils/device-detector.js',
+        'input-handlers/desktop-input.js', 
+        'input-handlers/mobile-input.js',
+        'main.js'
+      ];
+      
+      let currentIndex = 0;
+      
+      function loadNextScript() {
+        if (currentIndex >= scripts.length) {
+          console.log('All game scripts loaded successfully');
+          return;
+        }
+        
+        const script = document.createElement('script');
+        script.src = scripts[currentIndex];
+        
+        script.onload = () => {
+          console.log(`Loaded: ${scripts[currentIndex]}`);
+          currentIndex++;
+          loadNextScript();
+        };
+        
+        script.onerror = (error) => {
+          console.error(`Failed to load: ${scripts[currentIndex]}`, error);
+          // Continue loading other scripts even if one fails
+          currentIndex++;
+          loadNextScript();
+        };
+        
+        document.body.appendChild(script);
+      }
+      
+      loadNextScript();
+    }
+
     // Check if we're on a mobile browser
     function isMobileBrowser() {
       // Check for mobile user agents
@@ -595,6 +661,26 @@
       if (window.gameInstance && window.gameInstance.switchTeam) {
         console.log('Calling switchTeam with Blue');
         window.gameInstance.switchTeam('Blue');
+      } else {
+        console.error('gameInstance or switchTeam not available', window.gameInstance);
+      }
+    });
+
+    document.getElementById('join-yellow-team').addEventListener('click', function() {
+      console.log('Yellow team button clicked');
+      if (window.gameInstance && window.gameInstance.switchTeam) {
+        console.log('Calling switchTeam with Yellow');
+        window.gameInstance.switchTeam('Yellow');
+      } else {
+        console.error('gameInstance or switchTeam not available', window.gameInstance);
+      }
+    });
+
+    document.getElementById('join-green-team').addEventListener('click', function() {
+      console.log('Green team button clicked');
+      if (window.gameInstance && window.gameInstance.switchTeam) {
+        console.log('Calling switchTeam with Green');
+        window.gameInstance.switchTeam('Green');
       } else {
         console.error('gameInstance or switchTeam not available', window.gameInstance);
       }

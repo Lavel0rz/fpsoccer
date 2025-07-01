@@ -40,6 +40,8 @@ class MainScene extends Phaser.Scene {
     this.playerTeam = null;
     this.team1Score = 0;
     this.team2Score = 0;
+    this.team3Score = 0; // Yellow
+    this.team4Score = 0; // Green
     this.reconnectAttempts = 0;
     this.connectionAttempt = 0;
     this.isConnecting = false; // Track if we're currently connecting
@@ -153,7 +155,6 @@ class MainScene extends Phaser.Scene {
     // Add visibility change handler with improved mobile support
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
-        console.log('Page became visible');
         // If we have a pending reconnect, do it now
         if (this.pendingReconnect) {
           this.pendingReconnect = false;
@@ -167,8 +168,6 @@ class MainScene extends Phaser.Scene {
         else if (this.socket && this.socket.readyState === WebSocket.OPEN) {
           this.sendPing();
         }
-      } else {
-        console.log('Page hidden');
       }
     });
     
@@ -179,12 +178,15 @@ class MainScene extends Phaser.Scene {
     this.pingValue = 0;
     this.team1Score = 0;
     this.team2Score = 0;
+    this.team3Score = 0; // Yellow
+    this.team4Score = 0; // Green
     this.playerTeam = null;
     this.particleEmitterCreated = false;
     
     // Detect mobile browser
     this.isMobile = this.detectMobile();
     if (this.isMobile) {
+      // Log detection info for debugging
       console.log('Mobile browser detected');
     }
     
@@ -195,6 +197,21 @@ class MainScene extends Phaser.Scene {
     this.joystick = null;
     this.shootButton = null;
     this.boostButton = null;
+    
+    this.createTeamPieMenu = () => {
+      // ... code ...
+    };
+
+    this.nextSequence = 0;
+    this.lastPingTime = 0;
+    this.pingInterval = 1000; // 1 second
+    this.lastInputTime = 0;
+    
+    // Store current mouse world position for accurate shooting
+    this.currentMouseWorldPos = { x: 400, y: 300 }; // Initialize to center of screen
+
+    // Initialize team scores
+    this.team1Score = 0;
   }
   
   // Detect if we're on a mobile device
@@ -227,11 +244,57 @@ class MainScene extends Phaser.Scene {
     this.load.image('ball', 'assets/ball.png');
     this.load.image('spark', 'assets/ship_blue.png');
     this.load.image('cannon', 'assets/cannon.png'); // Add cannon sprite
-    this.load.json('mapData', 'assets/map_data.json');
+    this.load.json('mapData', 'assets/soccer.json');
     this.load.image('wall', 'assets/wall.png');
     this.load.image('goal', 'assets/goal.png');
     this.load.atlas('flares', 'https://labs.phaser.io/assets/particles/flares.png', 'https://labs.phaser.io/assets/particles/flares.json');
+    
+    // Load ship.png as a single sprite image
+    this.load.image('ship', 'assets/ship.png');
+    
+    // Load goal sound
+    this.load.audio('goalSound', 'assets/goalsound.mp3');
+    
+    // Load shooting sound
+    this.load.audio('shootSound', 'assets/shootingball.mp3');
+    
+    // Load rocket launch sound
+    this.load.audio('rocketSound', 'assets/rocketlaunch.mp3');
+    
+    // Load explosion sound
+    this.load.audio('explosionSound', 'assets/explosion.mp3');
+    
+    // Add load event listeners for debugging
+    this.load.on('filecomplete-audio-goalSound', () => {
+      console.log('✅ Goal sound loaded successfully!');
+    });
+    
+    this.load.on('filecomplete-audio-shootSound', () => {
+      console.log('✅ Shoot sound loaded successfully!');
+    });
+    
+    this.load.on('filecomplete-audio-rocketSound', () => {
+      console.log('✅ Rocket sound loaded successfully!');
+    });
+    
+    this.load.on('filecomplete-audio-explosionSound', () => {
+      console.log('✅ Explosion sound loaded successfully!');
+    });
+    
+    this.load.on('loaderror', (file) => {
+      if (file.key === 'goalSound') {
+        console.error('❌ Failed to load goal sound:', file.src);
+      } else if (file.key === 'shootSound') {
+        console.error('❌ Failed to load shoot sound:', file.src);
+      } else if (file.key === 'rocketSound') {
+        console.error('❌ Failed to load rocket sound:', file.src);
+      } else if (file.key === 'explosionSound') {
+        console.error('❌ Failed to load explosion sound:', file.src);
+      }
+    });
   }
+  
+  // Ship animations removed - using single ship.png sprite
   
   create() {
     // Disable context menu so right click can be used for boost.
@@ -254,6 +317,16 @@ class MainScene extends Phaser.Scene {
     const mapData = this.cache.json.get('mapData');
     this.mapObjects = mapData;
     
+    // Determine the current map name (for cornerdefense auto-shooting)
+    this.currentMapName = 'soccer'; // Now using corner.json 
+    this.isCornerDefenseMap = this.currentMapName === 'cornerdefense';
+    console.log(`Current map: ${this.currentMapName}, Server-side auto-shooting enabled: ${this.isCornerDefenseMap}`);
+    
+    // Auto-shooting state (client-side disabled for cornerdefense - server handles it)
+    this.autoShootCooldown = 0;
+    this.lastAutoShootTime = 0;
+    this.useServerAutoShooting = true; // Use server-side auto-shooting for max speed
+    
     // Determine the middle Y position to distinguish north from south
     let minY = Infinity;
     let maxY = -Infinity;
@@ -272,32 +345,36 @@ class MainScene extends Phaser.Scene {
     console.log(`Goal Y range: ${minY} to ${maxY}, middle: ${middleY}`);
     
     // Create colored rectangles for goals
-    const redGoalColor = 0xff0000;
-    const blueGoalColor = 0x0000ff;
-    
-    // Create map objects with appropriate coloring
+    const goalColors = {
+      'goal_red': 0xff0000,
+      'goal_blue': 0x0000ff,
+      'goal_yellow': 0xffdc00,
+      'goal_green': 0x00c800,
+      'goal': 0xffffff // fallback for old maps
+    };
+
     mapData.forEach(obj => {
       let sprite;
       if (obj.type === 'wall') {
-        sprite = this.add.image(obj.x + obj.width/2, obj.y + obj.height/2, 'wall')
-          .setDisplaySize(obj.width, obj.height)
-          .setOrigin(0.5);
-      } else if (obj.type === 'goal') {
-        // Instead of tinting, create colored rectangles for goals
-        const isNorthGoal = obj.y < middleY;
-        const goalColor = isNorthGoal ? redGoalColor : blueGoalColor;
-        const teamText = isNorthGoal ? "RED" : "BLUE";
-        
-        console.log(`Creating ${teamText} goal at (${obj.x}, ${obj.y})`);
-        
-        // Create a colored rectangle for the goal
+        // Make walls significantly bigger to match server collision
+        const wallPadding = 6; // Increased from 2 to 6 pixels on each side
+        // Render walls as gray rectangles instead of image sprites
         sprite = this.add.rectangle(
           obj.x + obj.width/2, 
           obj.y + obj.height/2, 
-          obj.width, 
-          obj.height, 
-          goalColor,
-          0.5 // Alpha (semi-transparent)
+          obj.width + wallPadding * 2, 
+          obj.height + wallPadding * 2, 
+          0x666666 // Dark gray color
+        ).setOrigin(0.5);
+      } else if (obj.type.startsWith('goal')) {
+        const color = goalColors[obj.type] || 0xffffff;
+        sprite = this.add.rectangle(
+          obj.x + obj.width/2,
+          obj.y + obj.height/2,
+          obj.width,
+          obj.height,
+          color,
+          0.5
         ).setOrigin(0.5);
       }
     });
@@ -311,9 +388,8 @@ class MainScene extends Phaser.Scene {
     // Background removed for testing purposes
     // this.createBackgroundGrid(extendedWidth, extendedHeight);
 
-    this.ship = this.add.sprite(400, 300, 'ship').setScale(0.09);
+    this.ship = this.add.sprite(400, 300, 'ship').setScale(0.1);
     this.ship.setDepth(10);
-    this.ship.rotation = 0; // Explicitly set initial rotation (pointing east/right)
     
     // Add cannon sprite to the ship
     this.cannon = this.add.sprite(this.ship.x, this.ship.y, 'cannon');
@@ -324,7 +400,7 @@ class MainScene extends Phaser.Scene {
     // Initialize cannon position
     this.updateCannonPosition();
     
-    this.ball = this.add.sprite(400, 400, 'ball').setScale(0.55).setOrigin(0.5);
+    this.ball = this.add.sprite(400, 400, 'ball').setScale(0.75).setOrigin(0.5);
     this.ball.setVisible(false);
     this.gravityCircle = this.add.graphics();
     
@@ -342,6 +418,15 @@ class MainScene extends Phaser.Scene {
     this.blueScoreText = this.add.text(this.scoreSeparator.x + this.scoreSeparator.width, scoreY, "0", { font: "16px Arial", fill: "#0000ff" }).setScrollFactor(0);
     
     this.teamText = this.add.text(10, 70, "Team: --", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    
+    // Initialize team scores for 4-team support
+    this.team1Score = 0;
+    this.team2Score = 0;
+    this.team3Score = 0;
+    this.team4Score = 0;
+    
+    // Create initial score pie chart
+    this.createScorePieChart();
     
     // Get player display name from window object or use default
     const playerName = window.PLAYER_DISPLAY_NAME || 'You';
@@ -380,8 +465,14 @@ class MainScene extends Phaser.Scene {
               this.scoreLabel, this.redScoreText, this.scoreSeparator, this.blueScoreText,
               this.teamText, 
               this.boostCircle, 
-              this.playerNameText
+              this.playerNameText,
+              this.scorePieChart, this.scorePieTitle
             ].filter(element => element !== undefined);
+            
+            // Also ignore score pie text elements if they exist
+            if (this.scorePieTexts) {
+              elementsToIgnore.push(...this.scorePieTexts.filter(element => element !== undefined));
+            }
             
             // Only call ignore if we have elements to ignore and minimap exists
             if (elementsToIgnore.length > 0 && this.minimap && typeof this.minimap.ignore === 'function') {
@@ -486,6 +577,8 @@ class MainScene extends Phaser.Scene {
     
     // Connect to the WebSocket server
     try {
+        // Simple WebSocket connection (exactly like working version)
+        console.log('🔌 Connecting to WebSocket server:', window.WEBSOCKET_URL);
         this.socket = new WebSocket(window.WEBSOCKET_URL);
         window.gameSocket = this.socket; // Store reference for cleanup
         
@@ -541,14 +634,9 @@ class MainScene extends Phaser.Scene {
             // Reset reconnection attempts on successful connection
             this.reconnectAttempts = 0;
             
-            if (connectionStatus) {
-              connectionStatus.textContent = 'Connected to game server';
-              connectionStatus.className = 'connected';
-              
-              // Hide the status after a few seconds
-              setTimeout(() => {
-                connectionStatus.style.opacity = '0';
-              }, 3000);
+            // Update connection status if the function exists
+            if (typeof updateConnectionStatus === 'function') {
+              updateConnectionStatus('connected', 'Connected to game server');
             }
             
             // Start sending regular pings to keep the connection alive (especially for mobile)
@@ -602,6 +690,9 @@ class MainScene extends Phaser.Scene {
         
         this.socket.addEventListener('message', (event) => {
           try {
+            // Debug: Log ALL incoming data
+            console.log('🔌 Raw WebSocket data received:', event.data);
+            
             // Handle simple text messages
             if (event.data === 'ping') {
               this.socket.send('pong');
@@ -617,6 +708,11 @@ class MainScene extends Phaser.Scene {
             // Try to parse as JSON
             try {
               const msg = JSON.parse(event.data);
+              
+              // Log all received messages for debugging (remove later)
+              if (msg.type) {
+                console.log('📨 Received message type:', msg.type, msg);
+              }
               
               // Handle ping response
               if (msg.type === "pong" && msg.timestamp) {
@@ -646,7 +742,12 @@ class MainScene extends Phaser.Scene {
                 this.clientId = msg.your_id;
                 this.playerTeam = msg.team;
                 this.isHost = msg.is_host;
-                console.log('Assigned client ID:', this.clientId, 'Team:', this.playerTeam, 'Host:', this.isHost);
+                console.log('🆔 Assigned client ID:', this.clientId, 'Team:', this.playerTeam, 'Host:', this.isHost);
+                console.log('🔗 Connection established, should receive goal messages for client ID:', this.clientId);
+                
+                // WebTransport integration commented out - using dual WebSocket approach
+                // Note: WebTransport will be re-enabled when API compatibility issues are resolved
+                console.log('🔌 Using dual WebSocket approach for enhanced performance');
                 
                 // Update team text and ship color
                 this.updateTeamDisplay();
@@ -654,6 +755,10 @@ class MainScene extends Phaser.Scene {
                   this.ship.setTint(0xff0000);
                 } else if (this.playerTeam === 'blue') {
                   this.ship.setTint(0x0000ff);
+                } else if (this.playerTeam === 'yellow') {
+                  this.ship.setTint(0xffdc00);
+                } else if (this.playerTeam === 'green') {
+                  this.ship.setTint(0x00c800);
                 }
                 
                 // Show/hide reset button based on host status
@@ -670,13 +775,44 @@ class MainScene extends Phaser.Scene {
               
               // Handle goal event
               if (msg.type === "goal") {
+                console.log("🎯 GOAL EVENT RECEIVED (First Handler):", msg);
+                console.log("🎯 Goal event details:", {
+                  type: msg.type,
+                  team1_score: msg.team1_score,
+                  team2_score: msg.team2_score,
+                  scored_on_team: msg.scored_on_team,
+                  scorer_name: msg.scorer_name
+                });
                 this.team1Score = msg.team1_score;
                 this.team2Score = msg.team2_score;
+                this.team3Score = msg.team3_score || 0;
+                this.team4Score = msg.team4_score || 0;
                 this.updateScoreDisplay();
                 
-                // Show goal animation with team color
-                const scorerTeam = msg.scorer_team;
-                this.showGoalAnimation(scorerTeam);
+                // Show goal message with scorer name
+                if (msg.scored_on_team) {
+                  const goalColor = msg.scored_on_team.toLowerCase();
+                  const scorerName = msg.scorer_name || "Unknown Player";
+                  const notificationMessage = `${scorerName} scored on ${goalColor} goal! ${msg.scored_on_team} team gets exclusive ball access.`;
+                  console.log("SHOWING GOAL NOTIFICATION:", notificationMessage);
+                  this.showNotification(notificationMessage, false);
+                  
+                  // Play goal sound - back to working approach
+                  try {
+                    console.log('🎵 Playing goal sound for real goal...');
+                    // Use the approach that was working - call testGoalSound directly
+                    if (window.testGoalSound) {
+                      window.testGoalSound();
+                      console.log('✅ Called working testGoalSound for real goal');
+                    } else {
+                      console.error('❌ testGoalSound not available, trying new method');
+                      this.playGoalSound();
+                    }
+                  } catch (soundError) {
+                    console.error('❌ Goal sound error:', soundError);
+                  }
+                }
+                
                 return;
               }
               
@@ -717,6 +853,19 @@ class MainScene extends Phaser.Scene {
               if (msg.type === 'projectile_fired') {
                 // Play projectile fired effect
                 this.playProjectileFiredEffect(msg.player_id);
+                
+                // Handle enhanced projectile data if available
+                if (msg.projectile) {
+                  console.log('🚀 Received enhanced projectile data:', msg.projectile);
+                  this.handleFastProjectileCreation(msg.projectile);
+                }
+                return;
+              }
+              
+              // Handle fast projectile position updates
+              if (msg.type === 'projectile_positions') {
+                console.log('⚡ Received fast projectile positions update:', msg.projectiles);
+                this.handleFastProjectileUpdates(msg.projectiles);
                 return;
               }
               
@@ -772,6 +921,17 @@ class MainScene extends Phaser.Scene {
         this.directionIndicator.lineTo(40, 0);
         this.directionIndicator.closePath();
         this.directionIndicator.strokePath();
+        
+            // Initialize audio volume controls
+    this.audioVolumes = {
+      goal: 0.8,        // Goal sound volume
+      shoot: 0.3,       // Ball shooting sound volume  
+      rocket: 0.9,      // Rocket launch sound volume
+      explosion: 0.3    // Explosion sound volume
+    };
+    
+    // Initialize audio on first user interaction
+    this.initializeAudio();
     } catch (error) {
         console.error('Error creating WebSocket:', error);
         this.cleanupConnection();
@@ -807,6 +967,485 @@ class MainScene extends Phaser.Scene {
     this.isConnecting = false;
   }
   
+  // Initialize audio system - required for browser audio policies
+  initializeAudio() {
+    console.log('🔊 Initializing audio system...');
+    
+    // Add a one-time click listener to enable audio
+    const enableAudio = () => {
+      console.log('🎵 User interaction detected, enabling audio...');
+      
+      if (this.sound && this.sound.context) {
+        if (this.sound.context.state === 'suspended') {
+          this.sound.context.resume().then(() => {
+            console.log('✅ Audio context resumed and ready!');
+          }).catch(err => {
+            console.error('❌ Failed to resume audio context:', err);
+          });
+        } else {
+          console.log('✅ Audio context already running!');
+        }
+      }
+      
+      // Remove the listener after first use
+      document.removeEventListener('click', enableAudio);
+      document.removeEventListener('keydown', enableAudio);
+      document.removeEventListener('touchstart', enableAudio);
+    };
+    
+    // Listen for any user interaction to enable audio
+    document.addEventListener('click', enableAudio);
+    document.addEventListener('keydown', enableAudio);
+    document.addEventListener('touchstart', enableAudio);
+    
+    // Make test function available globally - back to working version
+    window.testGoalSound = () => {
+      console.log('🧪 Testing goal sound...');
+      const gameInstance = window.gameInstance;
+      console.log('Audio context state:', gameInstance?.sound?.context?.state);
+      console.log('Sound manager exists:', !!gameInstance?.sound);
+      console.log('Goal sound exists:', !!gameInstance?.sound?.get('goalSound'));
+      
+      // ALWAYS force resume audio context first
+      if (gameInstance?.sound?.context) {
+        console.log('🔄 Force resuming audio context for test...');
+        return gameInstance.sound.context.resume().then(() => {
+          console.log('✅ Audio context resumed for test, new state:', gameInstance.sound.context.state);
+          const testSound = gameInstance.sound.play('goalSound', { volume: gameInstance.audioVolumes.goal });
+          console.log('Test sound object:', testSound);
+          return testSound;
+        }).catch(err => {
+          console.error('❌ Failed to resume audio context for test:', err);
+          // Try anyway
+          const testSound = gameInstance.sound.play('goalSound', { volume: gameInstance.audioVolumes.goal });
+          console.log('Test sound object (after error):', testSound);
+          return testSound;
+        });
+      } else if (gameInstance?.sound && gameInstance.sound.get('goalSound')) {
+        const testSound = gameInstance.sound.play('goalSound', { volume: gameInstance.audioVolumes.goal });
+        console.log('Test sound object (no context):', testSound);
+        console.log('Audio context state after play:', gameInstance?.sound?.context?.state);
+        return testSound;
+      } else {
+        console.error('Goal sound not available for testing');
+        return null;
+      }
+    };
+    
+    // Add test function for shoot sound
+    window.testShootSound = () => {
+      console.log('🧪 Testing shoot sound...');
+      const gameInstance = window.gameInstance;
+      console.log('Audio context state:', gameInstance?.sound?.context?.state);
+      console.log('Sound manager exists:', !!gameInstance?.sound);
+      console.log('Shoot sound exists:', !!gameInstance?.sound?.get('shootSound'));
+      
+      // ALWAYS force resume audio context first
+      if (gameInstance?.sound?.context) {
+        console.log('🔄 Force resuming audio context for shoot test...');
+        return gameInstance.sound.context.resume().then(() => {
+          console.log('✅ Audio context resumed for shoot test, new state:', gameInstance.sound.context.state);
+          const testSound = gameInstance.sound.play('shootSound', { volume: gameInstance.audioVolumes.shoot });
+          console.log('Test shoot sound object:', testSound);
+          return testSound;
+        }).catch(err => {
+          console.error('❌ Failed to resume audio context for shoot test:', err);
+          // Try anyway
+          const testSound = gameInstance.sound.play('shootSound', { volume: gameInstance.audioVolumes.shoot });
+          console.log('Test shoot sound object (after error):', testSound);
+          return testSound;
+        });
+      } else if (gameInstance?.sound && gameInstance.sound.get('shootSound')) {
+        const testSound = gameInstance.sound.play('shootSound', { volume: gameInstance.audioVolumes.shoot });
+        console.log('Test shoot sound object (no context):', testSound);
+        console.log('Audio context state after play:', gameInstance?.sound?.context?.state);
+        return testSound;
+      } else {
+        console.error('Shoot sound not available for testing');
+        return null;
+      }
+    };
+    
+    // Add test function for rocket sound
+    window.testRocketSound = () => {
+      console.log('🧪 Testing rocket sound...');
+      const gameInstance = window.gameInstance;
+      console.log('Audio context state:', gameInstance?.sound?.context?.state);
+      console.log('Sound manager exists:', !!gameInstance?.sound);
+      console.log('Rocket sound exists:', !!gameInstance?.sound?.get('rocketSound'));
+      
+      // ALWAYS force resume audio context first
+      if (gameInstance?.sound?.context) {
+        console.log('🔄 Force resuming audio context for rocket test...');
+        return gameInstance.sound.context.resume().then(() => {
+          console.log('✅ Audio context resumed for rocket test, new state:', gameInstance.sound.context.state);
+          const testSound = gameInstance.sound.play('rocketSound', { volume: gameInstance.audioVolumes.rocket });
+          console.log('Test rocket sound object:', testSound);
+          return testSound;
+        }).catch(err => {
+          console.error('❌ Failed to resume audio context for rocket test:', err);
+          // Try anyway
+          const testSound = gameInstance.sound.play('rocketSound', { volume: gameInstance.audioVolumes.rocket });
+          console.log('Test rocket sound object (after error):', testSound);
+          return testSound;
+        });
+      } else if (gameInstance?.sound && gameInstance.sound.get('rocketSound')) {
+        const testSound = gameInstance.sound.play('rocketSound', { volume: gameInstance.audioVolumes.rocket });
+        console.log('Test rocket sound object (no context):', testSound);
+        console.log('Audio context state after play:', gameInstance?.sound?.context?.state);
+        return testSound;
+      } else {
+        console.error('Rocket sound not available for testing');
+        return null;
+      }
+    };
+    
+    // Add test function for explosion sound
+    window.testExplosionSound = () => {
+      console.log('🧪 Testing explosion sound...');
+      const gameInstance = window.gameInstance;
+      console.log('Audio context state:', gameInstance?.sound?.context?.state);
+      console.log('Sound manager exists:', !!gameInstance?.sound);
+      console.log('Explosion sound exists:', !!gameInstance?.sound?.get('explosionSound'));
+      
+      // ALWAYS force resume audio context first
+      if (gameInstance?.sound?.context) {
+        console.log('🔄 Force resuming audio context for explosion test...');
+        return gameInstance.sound.context.resume().then(() => {
+          console.log('✅ Audio context resumed for explosion test, new state:', gameInstance.sound.context.state);
+          const testSound = gameInstance.sound.play('explosionSound', { volume: gameInstance.audioVolumes.explosion });
+          console.log('Test explosion sound object:', testSound);
+          return testSound;
+        }).catch(err => {
+          console.error('❌ Failed to resume audio context for explosion test:', err);
+          // Try anyway
+          const testSound = gameInstance.sound.play('explosionSound', { volume: gameInstance.audioVolumes.explosion });
+          console.log('Test explosion sound object (after error):', testSound);
+          return testSound;
+        });
+      } else if (gameInstance?.sound && gameInstance.sound.get('explosionSound')) {
+        const testSound = gameInstance.sound.play('explosionSound', { volume: gameInstance.audioVolumes.explosion });
+        console.log('Test explosion sound object (no context):', testSound);
+        console.log('Audio context state after play:', gameInstance?.sound?.context?.state);
+        return testSound;
+      } else {
+        console.error('Explosion sound not available for testing');
+        return null;
+      }
+    };
+    
+          console.log('💡 To test goal sound manually, type: window.testGoalSound()');
+      console.log('💡 To test shoot sound manually, type: window.testShootSound()');
+      console.log('💡 To test rocket sound manually, type: window.testRocketSound()');
+      console.log('💡 To test explosion sound manually, type: window.testExplosionSound()');
+      console.log('💡 To enable audio manually, type: window.enableAudio()');
+      console.log('💡 To test goal event manually, type: window.testGoalEvent()');
+      console.log('🔊 VOLUME CONTROLS:');
+      console.log('💡 Set goal volume: window.setGoalVolume(0.5)');
+      console.log('💡 Set shoot volume: window.setShootVolume(0.3)');
+      console.log('💡 Set rocket volume: window.setRocketVolume(0.5)');
+      console.log('💡 Set explosion volume: window.setExplosionVolume(0.6)');
+      console.log('💡 Set all volumes: window.setAllVolumes(0.4)');
+      console.log('💡 Show current volumes: window.showVolumes()');
+    
+    // Add manual goal event test - FIXED: Using regular function to preserve `this` context
+    window.testGoalEvent = function() {
+      console.log('🧪 Testing goal event handler manually...');
+      const gameInstance = window.gameInstance; // Get the game instance explicitly
+      const fakeGoalMsg = {
+        type: "goal",
+        scored_on_team: "Red",
+        scorer_name: "Test Player",
+        team1_score: 1,
+        team2_score: 0,
+        team3_score: 0,
+        team4_score: 0
+      };
+      
+      console.log('📨 Simulating goal message:', fakeGoalMsg);
+      console.log('🎮 Game instance:', !!gameInstance);
+      console.log('🎵 Sound manager:', !!gameInstance?.sound);
+      
+      // Call the goal handler directly
+      try {
+        gameInstance.team1Score = fakeGoalMsg.team1_score;
+        gameInstance.team2Score = fakeGoalMsg.team2_score;
+        gameInstance.team3Score = fakeGoalMsg.team3_score || 0;
+        gameInstance.team4Score = fakeGoalMsg.team4_score || 0;
+        gameInstance.updateScoreDisplay();
+        
+        // Test the sound part
+        if (fakeGoalMsg.scored_on_team) {
+          const goalColor = fakeGoalMsg.scored_on_team.toLowerCase();
+          const scorerName = fakeGoalMsg.scorer_name || "Unknown Player";
+          const notificationMessage = `${scorerName} scored on ${goalColor} goal! ${fakeGoalMsg.scored_on_team} team gets exclusive ball access.`;
+          console.log("SHOWING GOAL NOTIFICATION:", notificationMessage);
+          gameInstance.showNotification(notificationMessage, false);
+          
+          // Play goal sound - back to working approach
+          try {
+            console.log('🎵 Playing goal sound for test goal event...');
+            if (window.testGoalSound) {
+              window.testGoalSound();
+              console.log('✅ Called working testGoalSound for test goal event');
+            } else {
+              console.error('❌ testGoalSound not available');
+            }
+          } catch (soundError) {
+            console.error('❌ Goal sound error in test:', soundError);
+          }
+        }
+        
+        console.log('✅ Manual goal event test completed');
+        return true;
+      } catch (error) {
+        console.error('❌ Manual goal event test failed:', error);
+        return false;
+      }
+    };
+    
+    // Add manual audio enabler
+    window.enableAudio = () => {
+      console.log('🎵 Manually enabling audio...');
+      if (this.sound?.context) {
+        console.log('Current audio context state:', this.sound.context.state);
+        if (this.sound.context.state === 'suspended') {
+          return this.sound.context.resume().then(() => {
+            console.log('✅ Audio context manually resumed!');
+            console.log('New audio context state:', this.sound.context.state);
+            return true;
+          }).catch(err => {
+            console.error('❌ Failed to manually resume audio context:', err);
+            return false;
+          });
+        } else {
+          console.log('✅ Audio context already running!');
+          return Promise.resolve(true);
+        }
+      } else {
+        console.error('❌ No audio context available');
+        return Promise.resolve(false);
+      }
+    };
+    
+    // Add volume control functions
+    window.setGoalVolume = (volume) => {
+      const gameInstance = window.gameInstance;
+      if (gameInstance && gameInstance.audioVolumes) {
+        const newVolume = Math.max(0, Math.min(1, volume)); // Clamp between 0 and 1
+        gameInstance.audioVolumes.goal = newVolume;
+        console.log(`🎯 Goal volume set to: ${newVolume}`);
+        return newVolume;
+      } else {
+        console.error('❌ Game instance not available');
+        return null;
+      }
+    };
+    
+    window.setShootVolume = (volume) => {
+      const gameInstance = window.gameInstance;
+      if (gameInstance && gameInstance.audioVolumes) {
+        const newVolume = Math.max(0, Math.min(1, volume)); // Clamp between 0 and 1
+        gameInstance.audioVolumes.shoot = newVolume;
+        console.log(`🏀 Shoot volume set to: ${newVolume}`);
+        return newVolume;
+      } else {
+        console.error('❌ Game instance not available');
+        return null;
+      }
+    };
+    
+    window.setRocketVolume = (volume) => {
+      const gameInstance = window.gameInstance;
+      if (gameInstance && gameInstance.audioVolumes) {
+        const newVolume = Math.max(0, Math.min(1, volume)); // Clamp between 0 and 1
+        gameInstance.audioVolumes.rocket = newVolume;
+        console.log(`🚀 Rocket volume set to: ${newVolume}`);
+        return newVolume;
+      } else {
+        console.error('❌ Game instance not available');
+        return null;
+      }
+    };
+    
+    window.setExplosionVolume = (volume) => {
+      const gameInstance = window.gameInstance;
+      if (gameInstance && gameInstance.audioVolumes) {
+        const newVolume = Math.max(0, Math.min(1, volume)); // Clamp between 0 and 1
+        gameInstance.audioVolumes.explosion = newVolume;
+        console.log(`💥 Explosion volume set to: ${newVolume}`);
+        return newVolume;
+      } else {
+        console.error('❌ Game instance not available');
+        return null;
+      }
+    };
+    
+    window.showVolumes = () => {
+      const gameInstance = window.gameInstance;
+      if (gameInstance && gameInstance.audioVolumes) {
+        console.log('🔊 Current Audio Volumes:');
+        console.log(`🎯 Goal: ${gameInstance.audioVolumes.goal}`);
+        console.log(`🏀 Shoot: ${gameInstance.audioVolumes.shoot}`);
+        console.log(`🚀 Rocket: ${gameInstance.audioVolumes.rocket}`);
+        console.log(`💥 Explosion: ${gameInstance.audioVolumes.explosion}`);
+        return gameInstance.audioVolumes;
+      } else {
+        console.error('❌ Game instance not available');
+        return null;
+      }
+    };
+    
+    window.setAllVolumes = (volume) => {
+      const gameInstance = window.gameInstance;
+      if (gameInstance && gameInstance.audioVolumes) {
+        const newVolume = Math.max(0, Math.min(1, volume)); // Clamp between 0 and 1
+        gameInstance.audioVolumes.goal = newVolume;
+        gameInstance.audioVolumes.shoot = newVolume;
+        gameInstance.audioVolumes.rocket = newVolume;
+        gameInstance.audioVolumes.explosion = newVolume;
+        console.log(`🔊 All volumes set to: ${newVolume}`);
+        window.showVolumes(); // Show the new volumes
+        return newVolume;
+      } else {
+        console.error('❌ Game instance not available');
+        return null;
+      }
+    };
+  }
+  
+  // Clean goal sound method - uses the working approach
+  playGoalSound() {
+    console.log('🎯 GOAL! Playing goal sound...');
+    
+    // Use the approach that works - get game instance explicitly
+    const gameInstance = window.gameInstance || this;
+    
+    if (gameInstance?.sound?.context) {
+      console.log('🔄 Resuming audio context for goal...');
+      gameInstance.sound.context.resume().then(() => {
+        console.log('✅ Audio context resumed, playing goal sound');
+        if (gameInstance.sound && gameInstance.sound.get('goalSound')) {
+          const goalSound = gameInstance.sound.play('goalSound', { 
+            volume: gameInstance.audioVolumes.goal,
+            detune: 0,
+            rate: 1
+          });
+          console.log('🔊 Goal sound played successfully at volume:', gameInstance.audioVolumes.goal);
+        } else {
+          console.warn('⚠️ Goal sound not available');
+        }
+      }).catch(err => {
+        console.error('❌ Failed to resume audio context:', err);
+        // Try playing anyway
+        if (gameInstance.sound && gameInstance.sound.get('goalSound')) {
+          gameInstance.sound.play('goalSound', { volume: gameInstance.audioVolumes.goal });
+        }
+      });
+    } else {
+      console.error('❌ No audio context available for goal sound');
+    }
+  }
+  
+  // Clean shoot sound method - uses the same working approach
+  playShootSound() {
+    console.log('🏀 SHOOT! Playing shoot sound...');
+    
+    // Use the approach that works - get game instance explicitly
+    const gameInstance = window.gameInstance || this;
+    
+    if (gameInstance?.sound?.context) {
+      console.log('🔄 Resuming audio context for shoot...');
+      gameInstance.sound.context.resume().then(() => {
+        console.log('✅ Audio context resumed, playing shoot sound');
+        if (gameInstance.sound && gameInstance.sound.get('shootSound')) {
+          const shootSound = gameInstance.sound.play('shootSound', { 
+            volume: gameInstance.audioVolumes.shoot,
+            detune: 0,
+            rate: 1
+          });
+          console.log('🔊 Shoot sound played successfully at volume:', gameInstance.audioVolumes.shoot);
+        } else {
+          console.warn('⚠️ Shoot sound not available');
+        }
+      }).catch(err => {
+        console.error('❌ Failed to resume audio context:', err);
+        // Try playing anyway
+        if (gameInstance.sound && gameInstance.sound.get('shootSound')) {
+          gameInstance.sound.play('shootSound', { volume: gameInstance.audioVolumes.shoot });
+        }
+      });
+    } else {
+      console.error('❌ No audio context available for shoot sound');
+    }
+  }
+  
+  // Clean rocket sound method - uses the same working approach
+  playRocketSound() {
+    console.log('🚀 ROCKET! Playing rocket launch sound...');
+    
+    // Use the approach that works - get game instance explicitly
+    const gameInstance = window.gameInstance || this;
+    
+    if (gameInstance?.sound?.context) {
+      console.log('🔄 Resuming audio context for rocket...');
+      gameInstance.sound.context.resume().then(() => {
+        console.log('✅ Audio context resumed, playing rocket sound');
+        if (gameInstance.sound && gameInstance.sound.get('rocketSound')) {
+          const rocketSound = gameInstance.sound.play('rocketSound', { 
+            volume: gameInstance.audioVolumes.rocket,
+            detune: 0,
+            rate: 1
+          });
+          console.log('🔊 Rocket sound played successfully at volume:', gameInstance.audioVolumes.rocket);
+        } else {
+          console.warn('⚠️ Rocket sound not available');
+        }
+      }).catch(err => {
+        console.error('❌ Failed to resume audio context:', err);
+        // Try playing anyway
+        if (gameInstance.sound && gameInstance.sound.get('rocketSound')) {
+          gameInstance.sound.play('rocketSound', { volume: gameInstance.audioVolumes.rocket });
+        }
+      });
+    } else {
+      console.error('❌ No audio context available for rocket sound');
+    }
+  }
+  
+  // Clean explosion sound method - uses the same working approach
+  playExplosionSound() {
+    console.log('💥 BOOM! Playing explosion sound...');
+    
+    // Use the approach that works - get game instance explicitly
+    const gameInstance = window.gameInstance || this;
+    
+    if (gameInstance?.sound?.context) {
+      console.log('🔄 Resuming audio context for explosion...');
+      gameInstance.sound.context.resume().then(() => {
+        console.log('✅ Audio context resumed, playing explosion sound');
+        if (gameInstance.sound && gameInstance.sound.get('explosionSound')) {
+          const explosionSound = gameInstance.sound.play('explosionSound', { 
+            volume: gameInstance.audioVolumes.explosion,
+            detune: 0,
+            rate: 1
+          });
+          console.log('🔊 Explosion sound played successfully at volume:', gameInstance.audioVolumes.explosion);
+        } else {
+          console.warn('⚠️ Explosion sound not available');
+        }
+      }).catch(err => {
+        console.error('❌ Failed to resume audio context:', err);
+        // Try playing anyway
+        if (gameInstance.sound && gameInstance.sound.get('explosionSound')) {
+          gameInstance.sound.play('explosionSound', { volume: gameInstance.audioVolumes.explosion });
+        }
+      });
+    } else {
+      console.error('❌ No audio context available for explosion sound');
+    }
+  }
+  
   setupDesktopControls() {
     // Set up keyboard input
     this.input.keyboard.on('keydown', (event) => {
@@ -819,6 +1458,12 @@ class MainScene extends Phaser.Scene {
     
     // Handle space bar for shooting
     this.input.keyboard.on('keydown-SPACE', () => {
+      // Skip manual shooting for cornerdefense map (auto-shooting enabled)
+      if (this.isCornerDefenseMap) {
+        console.log('Manual shooting disabled for cornerdefense map (auto-shooting active)');
+        return;
+      }
+      
       console.log('Space bar pressed - shooting');
       this.inputState.shoot = true;
       this.sendInput();
@@ -833,6 +1478,12 @@ class MainScene extends Phaser.Scene {
     // Add mouse click for shooting as well
     this.input.on('pointerdown', (pointer) => {
       if (pointer.leftButtonDown()) {
+        // Skip manual shooting for cornerdefense map (auto-shooting enabled)
+        if (this.isCornerDefenseMap) {
+          console.log('Manual shooting disabled for cornerdefense map (auto-shooting active)');
+          return;
+        }
+        
         console.log('Left mouse button pressed - shooting');
         this.inputState.shoot = true;
         this.sendInput();
@@ -859,7 +1510,7 @@ class MainScene extends Phaser.Scene {
       }
     });
     
-    // Track mouse movement to update aim direction
+        // Track mouse movement to update aim direction
     this.input.on('pointermove', (pointer) => {
       // Convert pointer position to world coordinates
       const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
@@ -877,357 +1528,349 @@ class MainScene extends Phaser.Scene {
       if (mag > 10) {
         this.movementDirection.x = dx / mag;
         this.movementDirection.y = dy / mag;
-        
+       
         // Send updated input with new aim target
         this.sendInput();
+      }
+      
+      // For cornerdefense map, log mouse tracking for server auto-shooting
+      if (this.isCornerDefenseMap && this.useServerAutoShooting) {
+        console.log('Mouse tracking for server auto-shoot:', worldPoint.x.toFixed(1), worldPoint.y.toFixed(1));
       }
     });
   }
   
   setupMobileControls() {
-    console.log('Setting up mobile controls');
+    console.log('🎮 Setting up dual-joystick mobile controls');
     
     // Get screen dimensions
     const width = this.scale.width;
     const height = this.scale.height;
+    console.log('📱 Screen dimensions:', width, 'x', height);
     
-    // Create a container for the joystick that will stay fixed to the camera
-    this.joystickContainer = this.add.container(0, 0);
-    this.joystickContainer.setScrollFactor(0);
-    this.joystickContainer.setDepth(1000);
+    // Joystick dimensions
+    const baseRadius = 50;
+    const thumbRadius = 25;
     
-    // Create base and thumb for joystick - half the original size
-    const baseRadius = 40; // Reduced from 80
-    const thumbRadius = 20; // Reduced from 40
-    this.joystickBase = this.add.circle(0, 0, baseRadius, 0x888888, 0.5);
-    this.joystickThumb = this.add.circle(0, 0, thumbRadius, 0xcccccc, 0.8);
+    // === LEFT JOYSTICK (MOVEMENT) ===
+    this.leftJoystickContainer = this.add.container(0, 0);
+    this.leftJoystickContainer.setScrollFactor(0);
+    this.leftJoystickContainer.setDepth(1000);
     
-    // Add to container
-    this.joystickContainer.add(this.joystickBase);
-    this.joystickContainer.add(this.joystickThumb);
+    this.leftJoystickBase = this.add.circle(0, 0, baseRadius, 0x444444, 0.6);
+    this.leftJoystickThumb = this.add.circle(0, 0, thumbRadius, 0x888888, 0.8);
     
-    // Hide initially
-    this.joystickContainer.setVisible(false);
+    this.leftJoystickContainer.add([this.leftJoystickBase, this.leftJoystickThumb]);
+    this.leftJoystickContainer.setVisible(false);
     
-    // Track joystick state
-    this.joystickActive = false;
-    this.joystickTouchId = null;
-    this.joystickStartX = 0;
-    this.joystickStartY = 0;
-    this.joystickForce = 0;
-    this.joystickForceX = 0;
-    this.joystickForceY = 0;
-    this.joystickMaxDistance = baseRadius;
+    // Left joystick state
+    this.leftJoystickActive = false;
+    this.leftJoystickTouchId = null;
+    this.leftJoystickStartX = 0;
+    this.leftJoystickStartY = 0;
+    this.leftJoystickForceX = 0;
+    this.leftJoystickForceY = 0;
+    this.leftJoystickMaxDistance = baseRadius;
     
-    // Calculate button positions based on screen size - make them even smaller
-    const buttonSize = Math.min(20, Math.max(12, width * 0.025)); // Even smaller buttons
-    const buttonPadding = Math.min(70, Math.max(30, height * 0.07)); // Keep same padding
+    // === RIGHT JOYSTICK (AIMING + SHOOTING) ===
+    this.rightJoystickContainer = this.add.container(0, 0);
+    this.rightJoystickContainer.setScrollFactor(0);
+    this.rightJoystickContainer.setDepth(1000);
     
-    // Create a shoot button - fixed position
-    this.shootButton = this.add.circle(
-      width - buttonPadding,
-      height - buttonPadding,
-      buttonSize,
-      0xff0000,
-      0.8
-    );
-    this.shootButton.setScrollFactor(0); // Keep fixed on screen
-    this.shootButton.setDepth(1000); // Ensure it's on top
-    this.shootButton.setInteractive();
+    this.rightJoystickBase = this.add.circle(0, 0, baseRadius, 0x444400, 0.6);
+    this.rightJoystickThumb = this.add.circle(0, 0, thumbRadius, 0x888800, 0.8);
     
-    // Use direct event listeners instead of Phaser's event system
-    this.shootButton.on('pointerdown', (pointer) => {
-      console.log('Rocket button pressed');
-      // Stop event propagation to prevent other handlers
-      pointer.event.stopPropagation();
+    // Add shoot button in center of right joystick
+    this.rightJoystickShootButton = this.add.circle(0, 0, 15, 0xff0000, 0.9);
+    
+    this.rightJoystickContainer.add([this.rightJoystickBase, this.rightJoystickThumb, this.rightJoystickShootButton]);
+    this.rightJoystickContainer.setVisible(false);
+    
+    // Right joystick state
+    this.rightJoystickActive = false;
+    this.rightJoystickTouchId = null;
+    this.rightJoystickStartX = 0;
+    this.rightJoystickStartY = 0;
+    this.rightJoystickForceX = 0;
+    this.rightJoystickForceY = 0;
+    this.rightJoystickMaxDistance = baseRadius;
+    
+    // Add labels for joysticks
+    this.leftJoystickLabel = this.add.text(0, 0, 'MOVE', {
+      fontSize: '12px',
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 2
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(1001).setVisible(false);
+    
+    this.rightJoystickLabel = this.add.text(0, 0, 'AIM', {
+      fontSize: '12px', 
+      color: '#ffffff',
+      stroke: '#000000',
+      strokeThickness: 2
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(1001).setVisible(false);
+    
+    // Enable multi-touch
+    this.input.addPointer(3); // Support up to 4 touches
+    
+    // === POINTER DOWN HANDLER ===
+    this.input.on('pointerdown', (pointer) => {
+      const leftSide = pointer.x < width / 2;
+      const rightSide = pointer.x >= width / 2;
       
-      // Check if rocket is ready (if server state exists)
-      const rocketReady = !this.serverState.ship || this.serverState.ship.rocket_cooldown <= 0;
+      // LEFT SIDE - Movement joystick
+      if (leftSide && !this.leftJoystickActive) {
+        console.log('🕹️ Left joystick activated at', pointer.x, pointer.y, 'touchID:', pointer.id);
+        
+        this.leftJoystickStartX = pointer.x;
+        this.leftJoystickStartY = pointer.y;
+        this.leftJoystickContainer.setPosition(this.leftJoystickStartX, this.leftJoystickStartY);
+        this.leftJoystickThumb.setPosition(0, 0);
+        this.leftJoystickContainer.setVisible(true);
+        
+        // Position label
+        this.leftJoystickLabel.setPosition(this.leftJoystickStartX, this.leftJoystickStartY - 70);
+        this.leftJoystickLabel.setVisible(true);
+        
+        this.leftJoystickTouchId = pointer.id;
+        this.leftJoystickActive = true;
+        console.log('✅ Left joystick ready');
+        return;
+      }
       
-      if (rocketReady) {
-        // Set boost flag (fire rocket)
-        this.inputState.boost = true;
+      // RIGHT SIDE - Aiming joystick
+      if (rightSide && !this.rightJoystickActive) {
+        console.log('🎯 Right joystick activated at', pointer.x, pointer.y, 'touchID:', pointer.id);
         
-        // Get the direction the ship is facing
-        const angle = this.ship.rotation;
-        const dx = Math.cos(angle);
-        const dy = Math.sin(angle);
+        this.rightJoystickStartX = pointer.x;
+        this.rightJoystickStartY = pointer.y;
+        this.rightJoystickContainer.setPosition(this.rightJoystickStartX, this.rightJoystickStartY);
+        this.rightJoystickThumb.setPosition(0, 0);
+        this.rightJoystickContainer.setVisible(true);
         
-        // Set aim target in the direction the ship is facing
-        if (!this.aimTarget) {
-          this.aimTarget = { x: 0, y: 0 };
-        }
-        this.aimTarget.x = this.ship.x + dx * 200;
-        this.aimTarget.y = this.ship.y + dy * 200;
+        // Position label
+        this.rightJoystickLabel.setPosition(this.rightJoystickStartX, this.rightJoystickStartY - 70);
+        this.rightJoystickLabel.setVisible(true);
         
-        // Update movement direction for rotation
-        this.movementDirection.x = dx;
-        this.movementDirection.y = dy;
+        this.rightJoystickTouchId = pointer.id;
+        this.rightJoystickActive = true;
+        console.log('✅ Right joystick ready');
         
-        // Set a flag to indicate we've manually set the rotation
-        this.manualRotation = true;
-        this.manualRotationTime = Date.now();
-        
-        // Update cannon position and rotation immediately
-        this.updateCannonPosition();
-        
-        this.sendInput();
-        
-        // Reset boost flag after a short delay
-        setTimeout(() => {
-          this.inputState.boost = false;
-          this.sendInput();
-        }, 100);
-      } else {
-        console.log("Rocket on cooldown");
+        // Check if touch is in center (shoot button)
+        this.checkRightJoystickShoot(pointer);
+        return;
+      }
+      
+      console.log('⚠️ Touch ignored - Left side:', leftSide, 'Right side:', rightSide, 'LeftActive:', this.leftJoystickActive, 'RightActive:', this.rightJoystickActive);
+    });
+    
+    // === POINTER MOVE HANDLER ===
+    this.input.on('pointermove', (pointer) => {
+      // Update left joystick
+      if (this.leftJoystickActive && pointer.id === this.leftJoystickTouchId) {
+        this.updateLeftJoystick(pointer);
+      }
+      
+      // Update right joystick
+      if (this.rightJoystickActive && pointer.id === this.rightJoystickTouchId) {
+        this.updateRightJoystick(pointer);
       }
     });
     
-    // Add text to the shoot button
-    const shootText = this.add.text(
-      width - buttonPadding,
-      height - buttonPadding,
-      'FIRE',
-      { fontSize: Math.max(6, Math.min(10, width * 0.006)), color: '#ffffff' } // Smaller font
-    ).setOrigin(0.5);
-    shootText.setScrollFactor(0); // Keep fixed on screen
-    shootText.setDepth(1001); // Ensure it's on top of the button
+    // === POINTER UP HANDLER ===
+    this.input.on('pointerup', (pointer) => {
+      // Release left joystick
+      if (this.leftJoystickActive && pointer.id === this.leftJoystickTouchId) {
+        console.log('Left joystick released');
+        this.leftJoystickContainer.setVisible(false);
+        this.leftJoystickLabel.setVisible(false);
+        this.leftJoystickActive = false;
+        this.leftJoystickTouchId = null;
+        this.leftJoystickForceX = 0;
+        this.leftJoystickForceY = 0;
+        
+        // Reset movement input
+        this.inputState.left = false;
+        this.inputState.right = false;
+        this.inputState.up = false;
+        this.inputState.down = false;
+        this.sendInput();
+      }
+      
+      // Release right joystick
+      if (this.rightJoystickActive && pointer.id === this.rightJoystickTouchId) {
+        console.log('Right joystick released');
+        this.rightJoystickContainer.setVisible(false);
+        this.rightJoystickLabel.setVisible(false);
+        this.rightJoystickActive = false;
+        this.rightJoystickTouchId = null;
+        this.rightJoystickForceX = 0;
+        this.rightJoystickForceY = 0;
+      }
+    });
     
-    // Add a visual aiming indicator for rockets
-    this.rocketAimIndicator = this.add.graphics();
-    this.rocketAimIndicator.setScrollFactor(0);
-    this.rocketAimIndicator.setDepth(999);
-    this.rocketAimIndicator.setVisible(false);
+    // === POINTER CANCEL HANDLER ===
+    this.input.on('pointercancel', (pointer) => {
+      // Same as pointerup but for cancelled touches
+      if (this.leftJoystickActive && pointer.id === this.leftJoystickTouchId) {
+        this.leftJoystickContainer.setVisible(false);
+        this.leftJoystickLabel.setVisible(false);
+        this.leftJoystickActive = false;
+        this.leftJoystickTouchId = null;
+        this.leftJoystickForceX = 0;
+        this.leftJoystickForceY = 0;
+        
+        this.inputState.left = false;
+        this.inputState.right = false;
+        this.inputState.up = false;
+        this.inputState.down = false;
+        this.sendInput();
+      }
+      
+      if (this.rightJoystickActive && pointer.id === this.rightJoystickTouchId) {
+        this.rightJoystickContainer.setVisible(false);
+        this.rightJoystickLabel.setVisible(false);
+        this.rightJoystickActive = false;
+        this.rightJoystickTouchId = null;
+        this.rightJoystickForceX = 0;
+        this.rightJoystickForceY = 0;
+      }
+    });
+  }
+  
+  // Helper method to update left joystick (movement)
+  updateLeftJoystick(pointer) {
+    const dx = pointer.x - this.leftJoystickStartX;
+    const dy = pointer.y - this.leftJoystickStartY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
     
-    // Track rocket firing state
-    this.rocketAimActive = false;
-    this.rocketAimTouchId = null;
-    this.rocketAimX = 0;
-    this.rocketAimY = 0;
+    this.leftJoystickForceX = dx / this.leftJoystickMaxDistance;
+    this.leftJoystickForceY = dy / this.leftJoystickMaxDistance;
     
-    // Enable multi-touch
-    this.input.addPointer(3); // Support up to 4 touches (default is 2)
+    // Limit thumb position
+    let thumbX = dx;
+    let thumbY = dy;
     
-    // Handle pointer down for both joystick and rocket firing
-    this.input.on('pointerdown', (pointer) => {
-      // First check if this is the shoot button - give it highest priority
-      const distToShootButton = Phaser.Math.Distance.Between(
-        pointer.x, pointer.y,
-        width - buttonPadding, height - buttonPadding
+    if (distance > this.leftJoystickMaxDistance) {
+      const angle = Math.atan2(dy, dx);
+      thumbX = Math.cos(angle) * this.leftJoystickMaxDistance;
+      thumbY = Math.sin(angle) * this.leftJoystickMaxDistance;
+    }
+    
+    this.leftJoystickThumb.setPosition(thumbX, thumbY);
+    
+    // D-PAD STYLE: Convert analog input to discrete digital directions
+    // Reset all directions first
+    this.inputState.left = false;
+    this.inputState.right = false;
+    this.inputState.up = false;
+    this.inputState.down = false;
+    
+    // Only activate if joystick moved significantly (deadzone)
+    if (distance > 15) {
+      // Use stricter thresholds for more digital/discrete feel (like WASD)
+      if (this.leftJoystickForceX < -0.4) this.inputState.left = true;
+      if (this.leftJoystickForceX > 0.4) this.inputState.right = true;
+      if (this.leftJoystickForceY < -0.4) this.inputState.up = true;
+      if (this.leftJoystickForceY > 0.4) this.inputState.down = true;
+      
+      // For visual feedback, snap thumb to discrete positions (8-directional)
+      const angle = Math.atan2(dy, dx);
+      const discreteAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4); // Snap to 8 directions
+      const snapDistance = Math.min(distance, this.leftJoystickMaxDistance * 0.8);
+      
+      this.leftJoystickThumb.setPosition(
+        Math.cos(discreteAngle) * snapDistance,
+        Math.sin(discreteAngle) * snapDistance
       );
+    }
+    
+    // PURE MOVEMENT - no cannon control whatsoever
+    this.sendInput();
+  }
+  
+  // Helper method to update right joystick (aiming)
+  updateRightJoystick(pointer) {
+    const dx = pointer.x - this.rightJoystickStartX;
+    const dy = pointer.y - this.rightJoystickStartY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    this.rightJoystickForceX = dx / this.rightJoystickMaxDistance;
+    this.rightJoystickForceY = dy / this.rightJoystickMaxDistance;
+    
+    // Limit thumb position
+    let thumbX = dx;
+    let thumbY = dy;
+    
+    if (distance > this.rightJoystickMaxDistance) {
+      const angle = Math.atan2(dy, dx);
+      thumbX = Math.cos(angle) * this.rightJoystickMaxDistance;
+      thumbY = Math.sin(angle) * this.rightJoystickMaxDistance;
+    }
+    
+    this.rightJoystickThumb.setPosition(thumbX, thumbY);
+    
+    // Update aiming based on joystick direction - ONLY affects cannon, not ship
+    if (distance > 10) { // Only aim if joystick moved significantly
+      // Convert screen joystick direction to world coordinates
+      const worldDx = this.rightJoystickForceX * 200; // Scale factor for aiming distance
+      const worldDy = this.rightJoystickForceY * 200;
       
-      // If the touch is on or near the shoot button, let the button handler take care of it
-      if (distToShootButton < buttonSize * 3) { // Increased detection area for better usability
-        console.log('Touch on or near shoot button, letting button handler take over');
-        return;
-      }
-      
-      // If this is on the left side and no active joystick, create joystick
-      if (pointer.x < width / 2 && !this.joystickActive) {
-        console.log('Left side touched - creating joystick at', pointer.x, pointer.y);
-        
-        // Set joystick position to exact touch position in screen coordinates
-        this.joystickStartX = pointer.x;
-        this.joystickStartY = pointer.y;
-        
-        // Position the joystick container
-        this.joystickContainer.setPosition(this.joystickStartX, this.joystickStartY);
-        this.joystickThumb.setPosition(0, 0); // Center thumb on base
-        
-        // Make joystick visible
-        this.joystickContainer.setVisible(true);
-        
-        // Track this touch for future updates
-        this.joystickTouchId = pointer.id;
-        this.joystickActive = true;
-        return;
-      }
-      
-      // For any other touch (right side or left side with active joystick), shoot the ball
-      console.log('Shooting ball at', pointer.x, pointer.y);
-      
-      // Get the exact world coordinates where the user touched
-      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
-      console.log('World point for aiming:', worldPoint.x, worldPoint.y);
-      
-      // Update the aimTarget object with the touch coordinates
+      // Set aim target relative to ship position - THIS IS THE ONLY THING WE DO
       if (!this.aimTarget) {
         this.aimTarget = { x: 0, y: 0 };
       }
-      this.aimTarget.x = worldPoint.x;
-      this.aimTarget.y = worldPoint.y;
+      this.aimTarget.x = this.ship.x + worldDx;
+      this.aimTarget.y = this.ship.y + worldDy;
       
-      // Calculate direction vector for rotation
-      const dx = worldPoint.x - this.ship.x;
-      const dy = worldPoint.y - this.ship.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
+      // Let the cannon system handle the rest - DON'T touch ship rotation or movement direction
+      this.updateCannonPosition();
+    }
+    
+    // Check for shooting (center press)
+    this.checkRightJoystickShoot(pointer);
+  }
+  
+  // Helper method to check if right joystick center is pressed (shooting)
+  checkRightJoystickShoot(pointer) {
+    const dx = pointer.x - this.rightJoystickStartX;
+    const dy = pointer.y - this.rightJoystickStartY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    // If touch is in center area, shoot
+    if (distance < 20) { // Center deadzone for shooting
+      console.log('🎯 Right joystick center pressed - shooting!');
       
-      if (dist > 0) {
-        // Update movement direction for rotation
-        this.movementDirection.x = dx / dist;
-        this.movementDirection.y = dy / dist;
-        
-        // Directly set ship rotation to face the touch point
-        const angle = Math.atan2(dy, dx);
-        this.ship.rotation = angle;
-        console.log('Touch handler: Setting ship rotation to', angle);
-        
-        // Set a flag to indicate we've manually set the rotation
-        this.manualRotation = true;
-        this.manualRotationTime = Date.now();
-        
-        // Update cannon position and rotation immediately
-        this.updateCannonPosition();
+      // Skip shooting for cornerdefense map if auto-shooting is active
+      if (this.isCornerDefenseMap) {
+        console.log('Manual shooting disabled for cornerdefense map (auto-shooting active)');
+        return;
       }
       
       // Set shoot flag
       this.inputState.shoot = true;
-      
-      // Log the ship position and target for debugging
-      if (this.ship) {
-        console.log('Ship position:', this.ship.x, this.ship.y);
-        console.log('Aiming from ship to:', worldPoint.x, worldPoint.y);
-        
-        // Calculate and log the direction vector
-        const dx = worldPoint.x - this.ship.x;
-        const dy = worldPoint.y - this.ship.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        console.log('Direction vector:', dx/dist, dy/dist);
-      }
-      
-      // Send input to server immediately
       this.sendInput();
       
-      // Reset shoot flag after a short delay
+      // Reset shoot flag after delay
       setTimeout(() => {
         this.inputState.shoot = false;
         this.sendInput();
       }, 100);
       
-      // Show aiming indicator with improved visualization
-      this.rocketAimIndicator.clear();
-      this.rocketAimIndicator.lineStyle(2, 0xff9900, 0.8);
-      
-      // Get ship screen position
-      let shipScreenX, shipScreenY;
-      if (this.ship) {
-        const shipScreenPos = this.cameras.main.worldToScreenPoint(this.ship.x, this.ship.y);
-        shipScreenX = shipScreenPos.x;
-        shipScreenY = shipScreenPos.y;
-      } else {
-        // Fallback if ship isn't available
-        shipScreenX = width / 2;
-        shipScreenY = height / 2;
-      }
-      
-      // Draw a line from ship to touch point
-      this.rocketAimIndicator.beginPath();
-      this.rocketAimIndicator.moveTo(shipScreenX, shipScreenY);
-      this.rocketAimIndicator.lineTo(pointer.x, pointer.y);
-      this.rocketAimIndicator.strokePath();
-      
-      // Draw a circle at the touch point
-      this.rocketAimIndicator.strokeCircle(pointer.x, pointer.y, 10);
-      this.rocketAimIndicator.setVisible(true);
-      
-      // Hide the indicator after a short delay
+      // Visual feedback
+      this.rightJoystickShootButton.setTint(0x00ff00); // Green flash
       setTimeout(() => {
-        this.rocketAimIndicator.setVisible(false);
-      }, 300);
-    });
-    
-    // Handle pointer move to update joystick position
-    this.input.on('pointermove', (pointer) => {
-      if (this.joystickActive && pointer.id === this.joystickTouchId) {
-        // Calculate the distance from the start position
-        const dx = pointer.x - this.joystickStartX;
-        const dy = pointer.y - this.joystickStartY;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        // Calculate the direction and force
-        this.joystickForceX = dx / this.joystickMaxDistance;
-        this.joystickForceY = dy / this.joystickMaxDistance;
-        this.joystickForce = Math.min(distance / this.joystickMaxDistance, 1);
-        
-        // Limit the thumb position to the max distance
-        let thumbX = dx;
-        let thumbY = dy;
-        
-        if (distance > this.joystickMaxDistance) {
-          const angle = Math.atan2(dy, dx);
-          thumbX = Math.cos(angle) * this.joystickMaxDistance;
-          thumbY = Math.sin(angle) * this.joystickMaxDistance;
-        }
-        
-        // Update thumb position
-        this.joystickThumb.setPosition(thumbX, thumbY);
-        
-        // Update input state based on joystick position
-        this.updateJoystickInput();
-      }
-    });
-    
-    // Handle pointer up to hide joystick
-    this.input.on('pointerup', (pointer) => {
-      if (this.joystickActive && pointer.id === this.joystickTouchId) {
-        console.log('Joystick touch released');
-        this.joystickContainer.setVisible(false);
-        this.joystickActive = false;
-        this.joystickTouchId = null;
-        this.joystickForce = 0;
-        this.joystickForceX = 0;
-        this.joystickForceY = 0;
-        
-        // Reset movement input state when joystick is released
-        // BUT PRESERVE BOOST AND SHOOT STATE
-        const currentBoost = this.inputState.boost;
-        const currentShoot = this.inputState.shoot;
-        
-        this.inputState.left = false;
-        this.inputState.right = false;
-        this.inputState.up = false;
-        this.inputState.down = false;
-        
-        // Restore boost and shoot states
-        this.inputState.boost = currentBoost;
-        this.inputState.shoot = currentShoot;
-        
-        this.sendInput();
-      }
-    });
-    
-    // Handle pointer cancel to hide joystick
-    this.input.on('pointercancel', (pointer) => {
-      if (this.joystickActive && pointer.id === this.joystickTouchId) {
-        console.log('Joystick touch cancelled');
-        this.joystickContainer.setVisible(false);
-        this.joystickActive = false;
-        this.joystickTouchId = null;
-        this.joystickForce = 0;
-        this.joystickForceX = 0;
-        this.joystickForceY = 0;
-        
-        // Reset movement input state when joystick is released
-        // BUT PRESERVE BOOST AND SHOOT STATE
-        const currentBoost = this.inputState.boost;
-        const currentShoot = this.inputState.shoot;
-        
-        this.inputState.left = false;
-        this.inputState.right = false;
-        this.inputState.up = false;
-        this.inputState.down = false;
-        
-        // Restore boost and shoot states
-        this.inputState.boost = currentBoost;
-        this.inputState.shoot = currentShoot;
-        
-        this.sendInput();
-      }
-    });
+        this.rightJoystickShootButton.clearTint();
+      }, 200);
+    }
   }
   
   // Helper method to update input state based on joystick position
   updateJoystickInput() {
+    // DISABLED: This method is for the old single joystick system
+    // We now use dual joysticks with updateLeftJoystick() and updateRightJoystick()
+    return;
+    
     if (!this.joystickActive || this.joystickForce < 0.1) {
       return;
     }
@@ -1252,25 +1895,80 @@ class MainScene extends Phaser.Scene {
     this.inputState.boost = currentBoost;
     this.inputState.shoot = currentShoot;
     
-    // Update target direction for movement
-    this.targetDirection.x = this.joystickForceX;
-    this.targetDirection.y = this.joystickForceY;
+    // Convert joystick input to discrete 4-direction movement (same as desktop)
+    const movementDirection = {
+      x: this.joystickForceX,
+      y: this.joystickForceY
+    };
     
-    // Also update movement direction for consistent rotation
-    this.movementDirection.x = this.joystickForceX;
-    this.movementDirection.y = this.joystickForceY;
+    // Use the same discrete direction system as desktop
+    const discreteDirection = this.getDirectionFromVector(movementDirection);
+    const discreteDirectionVector = this.getDirectionVector(discreteDirection);
     
-    // Update ship rotation to face the joystick direction
+    // Update movement direction to discrete values (consistent with desktop)
+    this.movementDirection.x = discreteDirectionVector.x;
+    this.movementDirection.y = discreteDirectionVector.y;
+    
+    // Update target direction for consistent behavior
+    this.targetDirection.x = discreteDirectionVector.x;
+    this.targetDirection.y = discreteDirectionVector.y;
+    
+    // Update ship animation using the same system as desktop (4-direction sprites)
     if (this.joystickForce > 0.1) {
-      const angle = Math.atan2(this.joystickForceY, this.joystickForceX);
-      this.ship.rotation = angle;
+      this.updateShipAnimation(this.ship, discreteDirectionVector, true);
       
-      // Update cannon position and rotation
+      // Update cannon position based on discrete direction (not rotation)
       this.updateCannonPosition();
     }
     
     // Send input to server
     this.sendInput();
+  }
+  
+  // Update current mouse world position for accurate shooting
+  updateMouseWorldPosition() {
+    // Always try to get current mouse position, even if activePointer is null
+    let screenX, screenY;
+    
+    if (this.input.activePointer) {
+      screenX = this.input.activePointer.x;
+      screenY = this.input.activePointer.y;
+    } else if (this.input.mousePointer) {
+      screenX = this.input.mousePointer.x;
+      screenY = this.input.mousePointer.y;
+    } else {
+      // Use last known screen coordinates if available
+      screenX = this.lastScreenMousePos ? this.lastScreenMousePos.x : this.scale.width / 2;
+      screenY = this.lastScreenMousePos ? this.lastScreenMousePos.y : this.scale.height / 2;
+    }
+    
+    // Store screen coordinates for future use
+    this.lastScreenMousePos = { x: screenX, y: screenY };
+    
+    // Calculate world coordinates manually using camera position
+    // This ensures coordinates update even when mouse doesn't move but camera does
+    const camera = this.cameras.main;
+    const worldX = screenX + camera.scrollX;
+    const worldY = screenY + camera.scrollY;
+    
+    // Store the manually calculated world position
+    this.currentMouseWorldPos.x = worldX;
+    this.currentMouseWorldPos.y = worldY;
+    
+    // For cornerdefense auto-shooting, continuously update aim target
+    // This fixes the camera movement issue where mouse stays in same screen position but world coords change
+    if (this.isCornerDefenseMap && this.useServerAutoShooting) {
+      this.aimTarget.x = worldX;
+      this.aimTarget.y = worldY;
+    }
+    
+    // Debug logging (remove later)
+    if (Math.random() < 0.01) { // Log 1% of the time to avoid spam
+      console.log('Mouse screen:', screenX, screenY);
+      console.log('Mouse world (manual):', worldX.toFixed(1), worldY.toFixed(1));
+      console.log('Camera scroll:', camera.scrollX.toFixed(1), camera.scrollY.toFixed(1));
+      console.log('Ship pos:', this.ship ? this.ship.x.toFixed(1) : 'N/A', this.ship ? this.ship.y.toFixed(1) : 'N/A');
+    }
   }
   
   updateInputState(key, isDown) {
@@ -1312,14 +2010,41 @@ class MainScene extends Phaser.Scene {
     if (this.playerCanMove !== false && this.socket && this.socket.readyState === WebSocket.OPEN) {
       this.inputSequence++;
       
-      // Calculate aim target based on movement direction
-      const aimDistance = 100;
-      const targetX = this.aimTarget ? this.aimTarget.x : this.ship.x + this.movementDirection.x * aimDistance;
-      const targetY = this.aimTarget ? this.aimTarget.y : this.ship.y + this.movementDirection.y * aimDistance;
+      // Use the continuously updated mouse world position for accurate shooting
+      let targetX = this.ship.x;
+      let targetY = this.ship.y;
+      
+      if (this.isMobile && this.aimTarget && this.aimTarget.x !== undefined && this.aimTarget.y !== undefined) {
+        // Use aimTarget for mobile devices
+        targetX = this.aimTarget.x;
+        targetY = this.aimTarget.y;
+      } else if (this.input.activePointer) {
+        // Calculate world coordinates manually to handle camera movement
+        const screenX = this.input.activePointer.x;
+        const screenY = this.input.activePointer.y;
+        const camera = this.cameras.main;
+        targetX = screenX + camera.scrollX;
+        targetY = screenY + camera.scrollY;
+      } else {
+        // Fallback to stored position
+        targetX = this.currentMouseWorldPos.x;
+        targetY = this.currentMouseWorldPos.y;
+      }
       
       // Log shooting state for debugging
       if (this.inputState.shoot) {
-        console.log('Sending shoot command to server');
+        console.log('=== SHOOTING DEBUG ===');
+        console.log('Ship position:', this.ship.x.toFixed(1), this.ship.y.toFixed(1));
+        console.log('Target position:', targetX.toFixed(1), targetY.toFixed(1));
+        if (this.input.activePointer) {
+          console.log('Mouse screen pos:', this.input.activePointer.x, this.input.activePointer.y);
+          console.log('Mouse world pos:', this.input.activePointer.worldX.toFixed(1), this.input.activePointer.worldY.toFixed(1));
+        }
+        console.log('Camera scroll:', this.cameras.main.scrollX.toFixed(1), this.cameras.main.scrollY.toFixed(1));
+        const dx = targetX - this.ship.x;
+        const dy = targetY - this.ship.y;
+        console.log('Shot direction:', dx.toFixed(1), dy.toFixed(1));
+        console.log('Shot angle (degrees):', (Math.atan2(dy, dx) * 180 / Math.PI).toFixed(1));
       }
       
       // Log boost state for debugging
@@ -1341,19 +2066,13 @@ class MainScene extends Phaser.Scene {
         display_name: window.PLAYER_DISPLAY_NAME || 'Player'
       };
       
-      // Add joystick data for mobile users
-      if (this.isMobile && this.joystickActive && this.joystickForce > 0) {
-        input.joystick = {
-          force: this.joystickForce,
-          forceX: this.joystickForceX,
-          forceY: this.joystickForceY,
-          angle: Math.atan2(this.joystickForceY, this.joystickForceX)
-        };
+      // Debug logging for cornerdefense auto-shooting
+      if (this.isCornerDefenseMap && this.useServerAutoShooting && this.latestBallState && this.latestBallState.grabbed && this.latestBallState.owner === this.clientId) {
+        console.log('📡 SENDING TARGET to server:', targetX.toFixed(1), targetY.toFixed(1), 'ship:', this.ship.x.toFixed(1), this.ship.y.toFixed(1));
       }
       
-      // Log the input message for debugging
-      console.log('Sending input:', JSON.stringify(input));
-      
+      // Using dual WebSocket approach for enhanced performance
+      // WebTransport integration temporarily disabled pending API compatibility fixes
       this.socket.send(JSON.stringify(input));
       this.lastInputTime = Date.now();
     }
@@ -1384,23 +2103,30 @@ class MainScene extends Phaser.Scene {
         sprite.x = Phaser.Math.Linear(sprite.x, curr.x, smoothingFactor);
         sprite.y = Phaser.Math.Linear(sprite.y, curr.y, smoothingFactor);
 
-        // Calculate movement direction for rotation
+        // Calculate movement direction for animation
         const dx = curr.x - prev.x;
         const dy = curr.y - prev.y;
         
         if (dx !== 0 || dy !== 0) {
-          const angle = Math.atan2(dy, dx);
-          // Simple rotation with fixed speed
-          const rotationSpeed = 0.2;
-          sprite.rotation = Phaser.Math.Angle.RotateTo(sprite.rotation, angle, rotationSpeed);
+          // Update ship animation based on movement direction
+          this.updateShipAnimation(sprite, { x: dx, y: dy }, true);
+        } else {
+          // Animation disabled - using single ship.png sprite
         }
         
-        // Update cannon position and rotation
+        // Update cannon position and rotation based on animation
         if (sprite.cannon) {
-          const cannonDistance = 4; // Distance from ship center to cannon position
-          sprite.cannon.x = sprite.x + Math.cos(sprite.rotation) * cannonDistance;
-          sprite.cannon.y = sprite.y + Math.sin(sprite.rotation) * cannonDistance;
-          sprite.cannon.rotation = sprite.rotation;
+          // Get cannon position based on ship's current animation direction
+          const direction = this.getCannonPosition(sprite);
+          
+          // Position the cannon in front of the ship based on direction
+          const cannonDistance = 24; // Distance from ship center to cannon position
+          sprite.cannon.x = sprite.x + direction.x * cannonDistance;
+          sprite.cannon.y = sprite.y + direction.y * cannonDistance;
+          
+          // Calculate rotation angle for the cannon
+          const angle = Math.atan2(direction.y, direction.x);
+          sprite.cannon.rotation = angle;
           
           // Make the cannon more visible when rocket is ready
           if (curr.rocket_cooldown === 0) {
@@ -1463,12 +2189,49 @@ class MainScene extends Phaser.Scene {
   updateBall(time, delta) {
     if (!this.latestBallState || !this.ball) return;
 
+    // Handle ball pickup cooldown and team exclusive access
+    if (this.latestBallState.pickup_cooldown > 0) {
+      // During cooldown: Make the ball glow cyan
+      const glowIntensity = Math.sin(time * 0.01) * 0.5 + 0.5; // Oscillates between 0 and 1
+      const baseColor = 0xffffff; // White
+      const glowColor = 0x00ffff; // Cyan glow
+      
+      // Interpolate between base color and glow color
+      const r = Math.floor(255 * (1 - glowIntensity) + (glowColor >> 16 & 0xff) * glowIntensity);
+      const g = Math.floor(255 * (1 - glowIntensity) + (glowColor >> 8 & 0xff) * glowIntensity);
+      const b = Math.floor(255 * (1 - glowIntensity) + (glowColor & 0xff) * glowIntensity);
+      
+      const finalColor = (r << 16) | (g << 8) | b;
+      this.ball.setTint(finalColor);
+      
+      // Also make the ball slightly larger during cooldown
+      const scale = 1.0 + glowIntensity * 0.2; // Scale between 1.0 and 1.2
+      this.ball.setScale(scale);
+    } else if (this.latestBallState.exclusive_team) {
+      // After cooldown: Set ball color to match exclusive team
+      const teamColors = {
+        'Red': 0xff0000,
+        'Blue': 0x0078ff,
+        'Yellow': 0xffdc00,
+        'Green': 0x00c800
+      };
+      
+      const teamColor = teamColors[this.latestBallState.exclusive_team] || 0xffffff;
+      this.ball.setTint(teamColor);
+      this.ball.setScale(0.75);
+    } else {
+      // Normal state: Reset ball appearance
+      this.ball.clearTint();
+      this.ball.setScale(0.75);
+    }
+
     // Handle ball grabbing
     if (this.latestBallState.grabbed) {
       if (this.latestBallState.owner === this.clientId) {
-        // If we're grabbing the ball, position it at our ship
-        this.ball.x = this.predictedState.x;
-        this.ball.y = this.predictedState.y;
+        // If we're grabbing the ball, position it in front of our character
+        const ballOffset = this.getBallOffsetPosition(this.ship);
+        this.ball.x = this.predictedState.x + ballOffset.x;
+        this.ball.y = this.predictedState.y + ballOffset.y;
         this.ball.setDepth(20); // Highest depth to render on top of everything
         this.ball.setVisible(true);
         
@@ -1479,11 +2242,12 @@ class MainScene extends Phaser.Scene {
         }
         return;
       } else {
-        // If another player is grabbing the ball, position it at their ship
+        // If another player is grabbing the ball, position it in front of their character
         const grabbingSprite = this.otherShips[this.latestBallState.owner];
         if (grabbingSprite) {
-          this.ball.x = grabbingSprite.x;
-          this.ball.y = grabbingSprite.y;
+          const ballOffset = this.getBallOffsetPosition(grabbingSprite);
+          this.ball.x = grabbingSprite.x + ballOffset.x;
+          this.ball.y = grabbingSprite.y + ballOffset.y;
           this.ball.setDepth(20); // Highest depth to render on top of everything
           this.ball.setVisible(true);
           
@@ -1503,10 +2267,12 @@ class MainScene extends Phaser.Scene {
     // Maintain a history buffer for ball positions - but keep it small
     if (!this.ballHistory) this.ballHistory = [];
     
-    // Add current state to history
+    // Add current state to history including velocity for bounce detection
     this.ballHistory.push({
       x: this.latestBallState.x,
       y: this.latestBallState.y,
+      vx: this.latestBallState.vx || 0,
+      vy: this.latestBallState.vy || 0,
       timestamp: time
     });
     
@@ -1521,20 +2287,519 @@ class MainScene extends Phaser.Scene {
       const prev = this.ballHistory[this.ballHistory.length - 2];
       const curr = this.ballHistory[this.ballHistory.length - 1];
       
-      // Simple linear interpolation with fixed smoothing factor
-      const smoothingFactor = 0.1; // Fixed value for consistent movement
+      // Check for velocity direction change (indicates a bounce happened)
+      const prevVx = prev.vx || 0;
+      const prevVy = prev.vy || 0;
+      const currVx = curr.vx || 0;
+      const currVy = curr.vy || 0;
       
-      this.ball.x = Phaser.Math.Linear(this.ball.x, curr.x, smoothingFactor);
-      this.ball.y = Phaser.Math.Linear(this.ball.y, curr.y, smoothingFactor);
-      this.ball.setDepth(0);
+      const velocityChangeX = Math.abs(currVx - prevVx);
+      const velocityChangeY = Math.abs(currVy - prevVy);
+      const significantBounce = velocityChangeX > 60 || velocityChangeY > 60; // Higher threshold for subtlety
+      
+      if (significantBounce) {
+        // SUBTLE RETROACTIVE POSITIONING - blend toward wall edge gently
+        const ballRadius = 10;
+        let adjustedX = curr.x;
+        let adjustedY = curr.y;
+        
+        // Find the closest wall and position ball exactly at its edge
+        if (this.mapObjects) {
+          let closestWall = null;
+          let minDistance = Infinity;
+          
+          this.mapObjects.forEach(wall => {
+            if (wall.type !== 'wall') return;
+            
+            // Calculate distance to this wall
+            const wallLeft = wall.x;
+            const wallRight = wall.x + wall.width;
+            const wallTop = wall.y;
+            const wallBottom = wall.y + wall.height;
+            
+            // Find closest point on wall to ball
+            const closestX = Math.max(wallLeft, Math.min(curr.x, wallRight));
+            const closestY = Math.max(wallTop, Math.min(curr.y, wallBottom));
+            
+            const distance = Math.sqrt((curr.x - closestX) ** 2 + (curr.y - closestY) ** 2);
+            
+            if (distance < minDistance) {
+              minDistance = distance;
+              closestWall = { wall, closestX, closestY };
+            }
+          });
+          
+          // If we found a close wall, blend toward wall edge instead of snapping
+          if (closestWall && minDistance < 25) { // Slightly smaller radius for subtlety
+            const wall = closestWall.wall;
+            const wallLeft = wall.x;
+            const wallRight = wall.x + wall.width;
+            const wallTop = wall.y;
+            const wallBottom = wall.y + wall.height;
+            
+            // Calculate ideal position
+            let idealX = curr.x;
+            let idealY = curr.y;
+            
+            // Determine which side of the wall we're on and position accordingly
+            if (Math.abs(curr.x - wallLeft) < Math.abs(curr.x - wallRight)) {
+              idealX = wallLeft + ballRadius; // Closer to left side
+            } else {
+              idealX = wallRight - ballRadius; // Closer to right side  
+            }
+            
+            if (Math.abs(curr.y - wallTop) < Math.abs(curr.y - wallBottom)) {
+              idealY = wallTop + ballRadius; // Closer to top side
+            } else {
+              idealY = wallBottom - ballRadius; // Closer to bottom side
+            }
+            
+            // Blend toward ideal position instead of snapping
+            const blendFactor = 0.6; // Gentler blend
+            adjustedX = Phaser.Math.Linear(curr.x, idealX, blendFactor);
+            adjustedY = Phaser.Math.Linear(curr.y, idealY, blendFactor);
+          }
+        }
+        
+        this.ball.x = adjustedX;
+        this.ball.y = adjustedY;
+        
+        // Less frequent logging
+        if (Math.random() < 0.2) {
+          console.log(`Subtle bounce adjustment: (${adjustedX.toFixed(1)}, ${adjustedY.toFixed(1)})`);
+        }
+      } else {
+        // Normal smooth movement with PREDICTIVE COLLISION DETECTION
+        const smoothingFactor = 0.1;
+        
+        // Calculate where ball will be in next few frames
+        const prediction = this.predictBallMovement(curr, 5); // Predict further ahead (5 frames)
+        
+        if (prediction.willCollide) {
+          // Very subtle approach to collision point - barely noticeable
+          const collisionSmoothingFactor = 0.15; // Much gentler than 0.3
+          this.ball.x = Phaser.Math.Linear(this.ball.x, prediction.collisionPoint.x, collisionSmoothingFactor);
+          this.ball.y = Phaser.Math.Linear(this.ball.y, prediction.collisionPoint.y, collisionSmoothingFactor);
+          
+          // Only log occasionally to reduce console spam
+          if (Math.random() < 0.1) {
+            console.log(`Subtle prediction: (${prediction.collisionPoint.x.toFixed(1)}, ${prediction.collisionPoint.y.toFixed(1)})`);
+          }
+        } else {
+          // Slightly faster normal interpolation for smoother overall movement
+          const smoothingFactor = 0.12; // Slightly increased from 0.1
+          this.ball.x = Phaser.Math.Linear(this.ball.x, curr.x, smoothingFactor);
+          this.ball.y = Phaser.Math.Linear(this.ball.y, curr.y, smoothingFactor);
+        }
+      }
+      
+      // Enhanced wall bouncing visual feedback
+      this.updateBallWallInteraction(prev, curr);
+      
+      this.ball.setDepth(16); // Set higher than players and cannons (cannons are at 15) so ball renders on top during collisions
       this.ball.setVisible(true);
     } else {
       // If we don't have enough history, just use the latest position
       this.ball.x = this.latestBallState.x;
       this.ball.y = this.latestBallState.y;
-      this.ball.setDepth(0);
+      this.ball.setDepth(16); // Set higher than players and cannons so ball renders on top during collisions
       this.ball.setVisible(true);
     }
+  }
+
+  // Advanced predictive collision detection
+  predictBallMovement(ballState, framesAhead) {
+    if (!this.mapObjects) {
+      return { willCollide: false };
+    }
+    
+    const ballRadius = 10;
+    const dt = 1/60; // Assume 60fps
+    
+    // Simulate ball movement for multiple frames
+    let simX = ballState.x;
+    let simY = ballState.y;
+    let simVx = ballState.vx || 0;
+    let simVy = ballState.vy || 0;
+    
+    // Only predict for balls moving at reasonable speed to avoid jitter
+    const speed = Math.sqrt(simVx * simVx + simVy * simVy);
+    if (speed < 20) return { willCollide: false }; // Ignore very slow balls
+    
+    for (let frame = 0; frame < framesAhead; frame++) {
+      // Simulate one frame of movement
+      const nextX = simX + simVx * dt;
+      const nextY = simY + simVy * dt;
+      
+      // Apply friction
+      simVx *= 0.998;
+      simVy *= 0.998;
+      
+      // Check for wall collision on this simulated frame
+      for (const wall of this.mapObjects) {
+        if (wall.type !== 'wall') continue;
+        
+        // Ray-cast from current position to next position
+        const collision = this.raycastToWall(simX, simY, nextX, nextY, ballRadius, wall);
+        
+        if (collision.hit) {
+          // Only return prediction if collision is close enough to matter
+          if (frame <= 3) { // Only very imminent collisions
+            return {
+              willCollide: true,
+              collisionPoint: collision.point,
+              framesUntilCollision: frame,
+              wallHit: wall
+            };
+          }
+        }
+      }
+      
+      // Update simulated position
+      simX = nextX;
+      simY = nextY;
+      
+      // Boundary check
+      if (simX < ballRadius || simX > 2000 - ballRadius) simVx = -simVx;
+      if (simY < ballRadius || simY > 1200 - ballRadius) simVy = -simVy;
+    }
+    
+    return { willCollide: false };
+  }
+
+  // Ray-casting collision detection
+  raycastToWall(startX, startY, endX, endY, ballRadius, wall) {
+    // Expand wall by ball radius with slight buffer for smoother prediction
+    const buffer = 2; // Small buffer for gentler prediction
+    const wallLeft = wall.x - ballRadius - buffer;
+    const wallRight = wall.x + wall.width + ballRadius + buffer;
+    const wallTop = wall.y - ballRadius - buffer;
+    const wallBottom = wall.y + wall.height + ballRadius + buffer;
+    
+    // Check if ray intersects with expanded wall bounds
+    const intersection = this.lineRectIntersection(
+      startX, startY, endX, endY,
+      wallLeft, wallTop, wallRight - wallLeft, wallBottom - wallTop
+    );
+    
+    if (intersection.intersects) {
+      // Calculate exact collision point where ball center would be
+      let collisionX = intersection.x;
+      let collisionY = intersection.y;
+      
+      // Adjust collision point to account for ball radius (without buffer for final position)
+      if (Math.abs(collisionX - wall.x) < ballRadius) {
+        collisionX = wall.x + ballRadius; // Hit left side
+      } else if (Math.abs(collisionX - (wall.x + wall.width)) < ballRadius) {
+        collisionX = wall.x + wall.width - ballRadius; // Hit right side
+      }
+      
+      if (Math.abs(collisionY - wall.y) < ballRadius) {
+        collisionY = wall.y + ballRadius; // Hit top side
+      } else if (Math.abs(collisionY - (wall.y + wall.height)) < ballRadius) {
+        collisionY = wall.y + wall.height - ballRadius; // Hit bottom side
+      }
+      
+      return {
+        hit: true,
+        point: { x: collisionX, y: collisionY },
+        wall: wall
+      };
+    }
+    
+    return { hit: false };
+  }
+
+  // Enhanced wall bouncing visual feedback with client-side prediction
+  updateBallWallInteraction(prev, curr) {
+    if (!prev || !curr) return;
+    
+    // Initialize bounce state if needed
+    if (!this.lastBouncePositions) this.lastBouncePositions = new Set();
+    
+    // CLIENT-SIDE COLLISION PREDICTION for better WiFi experience
+    const ballRadius = 10;
+    const predictedBounce = this.predictWallCollision(
+      this.ball.x, this.ball.y, 
+      curr.vx || 0, curr.vy || 0, 
+      ballRadius
+    );
+    
+    if (predictedBounce.willCollide) {
+      // Snap ball to collision point for accurate bounces
+      this.ball.x = predictedBounce.collisionPoint.x;
+      this.ball.y = predictedBounce.collisionPoint.y;
+    }
+    
+    // Check proximity to walls and adjust ball appearance
+    const wallProximity = this.getWallProximity(curr.x, curr.y);
+    if (wallProximity.distance < 30) {
+      this.adjustBallForWallProximity(wallProximity);
+    } else {
+      if (!this.latestBallState.pickup_cooldown && !this.latestBallState.exclusive_team) {
+        this.ball.setScale(0.75);
+      }
+    }
+  }
+
+  // Client-side wall collision prediction for realistic bounce timing
+  predictWallCollision(ballX, ballY, velocityX, velocityY, ballRadius) {
+    if (!this.mapObjects) {
+      return { willCollide: false };
+    }
+
+    const speed = Math.sqrt(velocityX * velocityX + velocityY * velocityY);
+    
+    // For high speeds, disable client prediction - let server handle it
+    if (speed > 150) {
+      return { willCollide: false };
+    }
+    
+    if (speed < 10) {
+      return { willCollide: false };
+    }
+
+    // Use exact ball radius for precise contact, but allow slight penetration
+    const collisionRadius = ballRadius * 0.85; // Slightly smaller to allow penetration
+    
+    let closestCollision = null;
+
+    // Check collision with each wall - only for slower balls
+    this.mapObjects.forEach(wall => {
+      if (wall.type !== 'wall') return;
+      
+      // Use exact wall bounds
+      const wallLeft = wall.x;
+      const wallRight = wall.x + wall.width;
+      const wallTop = wall.y;
+      const wallBottom = wall.y + wall.height;
+      
+      // Check if ball is touching or overlapping the wall with penetration allowance
+      const touchingLeft = Math.abs(ballX - collisionRadius - wallLeft) <= 2;
+      const touchingRight = Math.abs(ballX + collisionRadius - wallRight) <= 2;
+      const touchingTop = Math.abs(ballY - collisionRadius - wallTop) <= 2;
+      const touchingBottom = Math.abs(ballY + collisionRadius - wallBottom) <= 2;
+      
+      const overlappingX = ballX + collisionRadius > wallLeft && ballX - collisionRadius < wallRight;
+      const overlappingY = ballY + collisionRadius > wallTop && ballY - collisionRadius < wallBottom;
+
+      // Only trigger on direct contact with slight penetration
+      if ((touchingLeft || touchingRight) && overlappingY) {
+        // Position ball to penetrate wall slightly (3 pixels inside)
+        const penetration = 3;
+        const collisionX = touchingLeft ? 
+          wallLeft + collisionRadius - penetration : 
+          wallRight - collisionRadius + penetration;
+        closestCollision = {
+          collisionPoint: { x: collisionX, y: ballY },
+          bounceVelocity: { x: -velocityX * 0.9, y: velocityY }
+        };
+        return; // Exit forEach early
+      } 
+      else if ((touchingTop || touchingBottom) && overlappingX) {
+        // Position ball to penetrate wall slightly (3 pixels inside)
+        const penetration = 3;
+        const collisionY = touchingTop ? 
+          wallTop + collisionRadius - penetration : 
+          wallBottom - collisionRadius + penetration;
+        closestCollision = {
+          collisionPoint: { x: ballX, y: collisionY },
+          bounceVelocity: { x: velocityX, y: -velocityY * 0.9 }
+        };
+        return; // Exit forEach early
+      }
+    });
+    
+    // Return collision only if we found direct contact
+    if (closestCollision) {
+      return {
+        willCollide: true,
+        collisionPoint: closestCollision.collisionPoint,
+        bounceVelocity: closestCollision.bounceVelocity
+      };
+    }
+    
+    return { willCollide: false };
+  }
+
+  // Helper method for line-rectangle intersection
+  lineRectIntersection(x1, y1, x2, y2, rectX, rectY, rectW, rectH) {
+    // Simple line-rectangle intersection check
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    
+    // Check if line crosses any of the rectangle edges
+    const left = rectX;
+    const right = rectX + rectW;
+    const top = rectY;
+    const bottom = rectY + rectH;
+    
+    // Find intersections with each edge
+    let closestIntersection = null;
+    let minT = Infinity;
+    
+    // Left edge
+    if (dx !== 0) {
+      const t = (left - x1) / dx;
+      if (t >= 0 && t <= 1) {
+        const y = y1 + t * dy;
+        if (y >= top && y <= bottom && t < minT) {
+          minT = t;
+          closestIntersection = { x: left, y: y };
+        }
+      }
+    }
+    
+    // Right edge
+    if (dx !== 0) {
+      const t = (right - x1) / dx;
+      if (t >= 0 && t <= 1) {
+        const y = y1 + t * dy;
+        if (y >= top && y <= bottom && t < minT) {
+          minT = t;
+          closestIntersection = { x: right, y: y };
+        }
+      }
+    }
+    
+    // Top edge
+    if (dy !== 0) {
+      const t = (top - y1) / dy;
+      if (t >= 0 && t <= 1) {
+        const x = x1 + t * dx;
+        if (x >= left && x <= right && t < minT) {
+          minT = t;
+          closestIntersection = { x: x, y: top };
+        }
+      }
+    }
+    
+    // Bottom edge
+    if (dy !== 0) {
+      const t = (bottom - y1) / dy;
+      if (t >= 0 && t <= 1) {
+        const x = x1 + t * dx;
+        if (x >= left && x <= right && t < minT) {
+          minT = t;
+          closestIntersection = { x: x, y: bottom };
+        }
+      }
+    }
+    
+    if (closestIntersection) {
+      return {
+        intersects: true,
+        x: closestIntersection.x,
+        y: closestIntersection.y
+      };
+    }
+    
+    return { intersects: false };
+  }
+  
+  createBounceEffect(x, y, vx, vy) {
+    // Create a smaller flash effect at bounce location
+    const bounceFlash = this.add.circle(x, y, 8, 0xffffff, 0.5); // Reduced size and opacity
+    bounceFlash.setDepth(17); // Above the ball
+    
+    // Faster, smaller fade out
+    this.tweens.add({
+      targets: bounceFlash,
+      alpha: 0,
+      scale: 0.2,
+      duration: 100, // Faster fade
+      onComplete: () => bounceFlash.destroy()
+    });
+    
+    // Add fewer, smaller particle effects in the bounce direction
+    if (this.particleEmitter) {
+      // Emit particles in the direction opposite to the ball's movement
+      const particleAngle = Math.atan2(-vy, -vx);
+      for (let i = 0; i < 5; i++) { // Reduced number of particles
+        const spread = 0.3; // Reduced spread
+        const angle = particleAngle + (Math.random() - 0.5) * spread;
+        const distance = 10 + Math.random() * 8; // Reduced distance
+        
+        this.particleEmitter.emitParticleAt(
+          x + Math.cos(angle) * distance,
+          y + Math.sin(angle) * distance
+        );
+      }
+    }
+    
+    // Smaller ball pulse
+    this.ball.setScale(0.85);
+    this.tweens.add({
+      targets: this.ball,
+      scaleX: 0.75,
+      scaleY: 0.75,
+      duration: 80, // Faster animation
+      ease: 'Back.easeOut'
+    });
+  }
+  
+  getWallProximity(x, y) {
+    let minDistance = Infinity;
+    let closestWallNormal = { x: 0, y: 0 };
+    
+    // Check distance to map walls
+    if (this.mapObjects) {
+      this.mapObjects.forEach(obj => {
+        if (obj.type === 'wall') {
+          // Calculate distance to wall rectangle
+          const wallLeft = obj.x;
+          const wallRight = obj.x + obj.width;
+          const wallTop = obj.y;
+          const wallBottom = obj.y + obj.height;
+          
+          // Find closest point on wall to ball
+          const closestX = Math.max(wallLeft, Math.min(x, wallRight));
+          const closestY = Math.max(wallTop, Math.min(y, wallBottom));
+          
+          const distance = Math.sqrt((x - closestX) ** 2 + (y - closestY) ** 2);
+          
+          if (distance < minDistance) {
+            minDistance = distance;
+            
+            // Calculate normal vector pointing away from wall
+            if (x < wallLeft) closestWallNormal = { x: -1, y: 0 };
+            else if (x > wallRight) closestWallNormal = { x: 1, y: 0 };
+            else if (y < wallTop) closestWallNormal = { x: 0, y: -1 };
+            else if (y > wallBottom) closestWallNormal = { x: 0, y: 1 };
+          }
+        }
+      });
+    }
+    
+    return { distance: minDistance, normal: closestWallNormal };
+  }
+  
+  adjustBallForWallProximity(wallProximity) {
+    const { distance, normal } = wallProximity;
+    
+    // Calculate compression effect based on proximity
+    const maxProximity = 30;
+    const compressionFactor = Math.max(0, (maxProximity - distance) / maxProximity);
+    
+    // Slightly squish the ball toward the wall and stretch it away
+    const baseScale = 0.75;
+    const squishAmount = compressionFactor * 0.15; // Maximum 15% compression
+    
+    let scaleX = baseScale;
+    let scaleY = baseScale;
+    
+    // Compress in the direction of the wall normal
+    if (Math.abs(normal.x) > Math.abs(normal.y)) {
+      // Horizontal wall - compress horizontally, stretch vertically
+      scaleX = baseScale - squishAmount;
+      scaleY = baseScale + squishAmount * 0.5;
+    } else {
+      // Vertical wall - compress vertically, stretch horizontally  
+      scaleX = baseScale + squishAmount * 0.5;
+      scaleY = baseScale - squishAmount;
+    }
+    
+    this.ball.setScale(scaleX, scaleY);
   }
 
   generateParticles() {
@@ -1561,23 +2826,15 @@ class MainScene extends Phaser.Scene {
     const dt = delta / 1000;
     const shipSpeed = 120; // Increased from 100 to 120 (20% faster) to match server
     
-    // Initialize direction change flags for use throughout the method
-    let oppositeDirection = false;
-    let directionChanged = false;
-    let targetLength = 0;
-    
-    // Initialize smoothedDirection if it doesn't exist
-    if (!this.smoothedDirection) {
-      this.smoothedDirection = { x: 0, y: 0 };
+    // Handle auto-shooting for cornerdefense map
+    if (this.isCornerDefenseMap && !this.useServerAutoShooting) {
+      // Only use client-side auto-shooting if server-side is disabled
+      this.handleAutoShooting(time, delta);
     }
     
     // Only process input if player can move (not during countdown)
     if (this.playerCanMove !== false) {
-      // Store previous target direction for change detection
-      const prevTargetX = this.targetDirection.x;
-      const prevTargetY = this.targetDirection.y;
-      
-      // Calculate target direction based on input
+      // Calculate target direction based on input - direct, no smoothing
       this.targetDirection.x = 0;
       this.targetDirection.y = 0;
       
@@ -1592,120 +2849,40 @@ class MainScene extends Phaser.Scene {
         if (this.inputState.down) this.targetDirection.y += 1;
         
         // Normalize target direction if it's not zero
-        targetLength = Math.sqrt(this.targetDirection.x * this.targetDirection.x + this.targetDirection.y * this.targetDirection.y);
+        const targetLength = Math.sqrt(this.targetDirection.x * this.targetDirection.x + this.targetDirection.y * this.targetDirection.y);
         if (targetLength > 0) {
           this.targetDirection.x /= targetLength;
           this.targetDirection.y /= targetLength;
         }
       }
       
-      // Detect significant direction changes
-      if (targetLength > 0 && (prevTargetX !== 0 || prevTargetY !== 0)) {
-        // Calculate dot product to detect direction change
-        const dotProduct = this.targetDirection.x * prevTargetX + this.targetDirection.y * prevTargetY;
-        // If dot product is negative, directions are opposite (>90 degrees)
-        oppositeDirection = dotProduct < 0;
-        // If dot product is negative or small, direction changed significantly
-        directionChanged = dotProduct < 0.7;
-      }
-      
       // For desktop, we don't update the movement direction from keyboard input
       // since it's now controlled by the mouse position
       if (this.isMobile) {
-        // Gradually turn towards the target direction (for mobile only)
-        if (targetLength > 0) {
-          // Interpolate current direction towards target direction
-          this.movementDirection.x = Phaser.Math.Linear(this.movementDirection.x, this.targetDirection.x, this.turnSpeed);
-          this.movementDirection.y = Phaser.Math.Linear(this.movementDirection.y, this.targetDirection.y, this.turnSpeed);
-          
-          // Normalize the movement direction
-          const moveLength = Math.sqrt(this.movementDirection.x * this.movementDirection.x + this.movementDirection.y * this.movementDirection.y);
-          if (moveLength > 0) {
-            this.movementDirection.x /= moveLength;
-            this.movementDirection.y /= moveLength;
-          }
+        // For mobile, use direct joystick input without smoothing
+        if (this.targetDirection.x !== 0 || this.targetDirection.y !== 0) {
+          this.movementDirection.x = this.targetDirection.x;
+          this.movementDirection.y = this.targetDirection.y;
           
           // Update aim target to be in the direction of movement
           const aimDistance = 100; // How far ahead to aim
           this.aimTarget.x = this.ship.x + this.movementDirection.x * aimDistance;
           this.aimTarget.y = this.ship.y + this.movementDirection.y * aimDistance;
         } else {
-          // If no input, gradually slow down
-          this.movementDirection.x *= 0.95;
-          this.movementDirection.y *= 0.95;
+          // If no input, stop immediately
+          this.movementDirection.x = 0;
+          this.movementDirection.y = 0;
         }
       }
     }
     
-    // Apply easing to direction changes
-    // Use different easing factors based on whether direction changed significantly
-    // For opposite directions (180-degree turns), use an even smaller factor
-    const easingFactor = oppositeDirection ? 0.02 : (directionChanged ? 0.08 : 0.15);
+    // Use target direction directly for movement - no smoothing/easing
+    const moveDirection = { x: this.targetDirection.x, y: this.targetDirection.y };
     
-    // For opposite direction changes, create a more natural arc-like transition
-    if (oppositeDirection && targetLength > 0) {
-      // For opposite directions, we'll use a simple lerp approach for maximum smoothness
-      // This creates a very natural, gradual turning motion
-      
-      // Use a more aggressive lerp factor for opposite directions
-      const oppositeLerpFactor = 0.04; // Increased from 0.015 for more aggressive turning
-      
-      // Simple linear interpolation between current and target direction
-      this.smoothedDirection.x = Phaser.Math.Linear(
-        this.smoothedDirection.x, 
-        this.targetDirection.x, 
-        oppositeLerpFactor
-      );
-      this.smoothedDirection.y = Phaser.Math.Linear(
-        this.smoothedDirection.y, 
-        this.targetDirection.y, 
-        oppositeLerpFactor
-      );
-      
-      // Normalize the direction vector to maintain consistent speed
-      const smoothedLength = Math.sqrt(
-        this.smoothedDirection.x * this.smoothedDirection.x + 
-        this.smoothedDirection.y * this.smoothedDirection.y
-      );
-      
-      if (smoothedLength > 0.01) {
-        this.smoothedDirection.x /= smoothedLength;
-        this.smoothedDirection.y /= smoothedLength;
-      }
-    } else {
-      // For non-opposite directions, use normal linear interpolation with standard factor
-      this.smoothedDirection.x = Phaser.Math.Linear(
-        this.smoothedDirection.x, 
-        this.targetDirection.x, 
-        easingFactor
-      );
-      this.smoothedDirection.y = Phaser.Math.Linear(
-        this.smoothedDirection.y, 
-        this.targetDirection.y, 
-        easingFactor
-      );
-    }
-    
-    // Normalize smoothed direction if it's not zero
-    const smoothedLength = Math.sqrt(
-      this.smoothedDirection.x * this.smoothedDirection.x + 
-      this.smoothedDirection.y * this.smoothedDirection.y
-    );
-    
-    if (smoothedLength > 0) {
-      // Only normalize if length is significant to avoid division by very small numbers
-      if (smoothedLength > 0.01) {
-        this.smoothedDirection.x /= smoothedLength;
-        this.smoothedDirection.y /= smoothedLength;
-      }
-      
-      // Update predicted position based on smoothed direction
-      this.predictedState.x += this.smoothedDirection.x * shipSpeed * dt;
-      this.predictedState.y += this.smoothedDirection.y * shipSpeed * dt;
-    } else if (targetLength === 0) {
-      // If no input and smoothed direction is very small, just zero it out
-      this.smoothedDirection.x = 0;
-      this.smoothedDirection.y = 0;
+    // Update predicted position based on direct input direction
+    if (moveDirection.x !== 0 || moveDirection.y !== 0) {
+      this.predictedState.x += moveDirection.x * shipSpeed * dt;
+      this.predictedState.y += moveDirection.y * shipSpeed * dt;
     }
     
     // Server reconciliation - smoothly correct client prediction errors
@@ -1736,123 +2913,35 @@ class MainScene extends Phaser.Scene {
     this.ship.x = this.predictedState.x;
     this.ship.y = this.predictedState.y;
     
-    // Update ship rotation to match aim direction - use smoothed direction for desktop
-    if (!this.isMobile && (this.smoothedDirection.x !== 0 || this.smoothedDirection.y !== 0)) {
-      const angle = Math.atan2(this.smoothedDirection.y, this.smoothedDirection.x);
+    // Update ship animation based on movement direction
+    if (!this.isMobile && (moveDirection.x !== 0 || moveDirection.y !== 0)) {
+      // Update ship animation based on movement direction
+      this.updateShipAnimation(this.ship, moveDirection, true);
       
-      // Use lerp for rotation as well for maximum smoothness
-      // Convert angles to vectors, lerp the vectors, then convert back to angle
-      // This avoids issues with angle wrapping and creates the smoothest possible rotation
-      
-      const currentRotationVector = {
-        x: Math.cos(this.ship.rotation),
-        y: Math.sin(this.ship.rotation)
-      };
-      
-      const targetRotationVector = {
-        x: Math.cos(angle),
-        y: Math.sin(angle)
-      };
-      
-      // Use a more aggressive lerp factor for rotation
-      const rotationLerpFactor = oppositeDirection ? 0.08 : 0.15;
-      
-      // Lerp the rotation vectors
-      const newRotationX = Phaser.Math.Linear(
-        currentRotationVector.x,
-        targetRotationVector.x,
-        rotationLerpFactor
-      );
-      
-      const newRotationY = Phaser.Math.Linear(
-        currentRotationVector.y,
-        targetRotationVector.y,
-        rotationLerpFactor
-      );
-      
-      // Convert back to angle
-      this.ship.rotation = Math.atan2(newRotationY, newRotationX);
-      
-      // Update cannon position after rotation
+      // Update cannon position after animation change
       this.updateCannonPosition();
     } else if (this.isMobile) {
-      // For mobile, only update rotation if we haven't manually set it recently
+      // For mobile, only update animation if we haven't manually set it recently
       // or if we're using the joystick
       const manualRotationTimeout = 500; // Keep manual rotation for 500ms
       const useManualRotation = this.manualRotation && 
                                (Date.now() - this.manualRotationTime < manualRotationTimeout);
       
       if (!useManualRotation && this.movementDirection.x !== 0 && this.movementDirection.y !== 0) {
-        const angle = Math.atan2(this.movementDirection.y, this.movementDirection.x);
+        // Update ship animation based on movement direction
+        this.updateShipAnimation(this.ship, this.movementDirection, true);
         
-        // Use the same vector-based lerp for mobile rotation
-        const currentRotationVector = {
-          x: Math.cos(this.ship.rotation),
-          y: Math.sin(this.ship.rotation)
-        };
-        
-        const targetRotationVector = {
-          x: Math.cos(angle),
-          y: Math.sin(angle)
-        };
-        
-        // Use a more aggressive lerp factor for rotation on mobile
-        const rotationLerpFactor = 0.2;
-        
-        // Lerp the rotation vectors
-        const newRotationX = Phaser.Math.Linear(
-          currentRotationVector.x,
-          targetRotationVector.x,
-          rotationLerpFactor
-        );
-        
-        const newRotationY = Phaser.Math.Linear(
-          currentRotationVector.y,
-          targetRotationVector.y,
-          rotationLerpFactor
-        );
-        
-        // Convert back to angle
-        this.ship.rotation = Math.atan2(newRotationY, newRotationX);
-        
-        // Update cannon position after rotation
+        // Update cannon position after animation change
         this.updateCannonPosition();
       }
     } else if (this.movementDirection.x !== 0 || this.movementDirection.y !== 0) {
-      const angle = Math.atan2(this.movementDirection.y, this.movementDirection.x);
+      // Update ship animation based on movement direction
+      this.updateShipAnimation(this.ship, this.movementDirection, true);
       
-      // Use the same vector-based lerp for mobile rotation
-      const currentRotationVector = {
-        x: Math.cos(this.ship.rotation),
-        y: Math.sin(this.ship.rotation)
-      };
-      
-      const targetRotationVector = {
-        x: Math.cos(angle),
-        y: Math.sin(angle)
-      };
-      
-      // Use a more aggressive lerp factor for rotation on mobile
-      const rotationLerpFactor = 0.2;
-      
-      // Lerp the rotation vectors
-      const newRotationX = Phaser.Math.Linear(
-        currentRotationVector.x,
-        targetRotationVector.x,
-        rotationLerpFactor
-      );
-      
-      const newRotationY = Phaser.Math.Linear(
-        currentRotationVector.y,
-        targetRotationVector.y,
-        rotationLerpFactor
-      );
-      
-      // Convert back to angle
-      this.ship.rotation = Math.atan2(newRotationY, newRotationX);
-      
-      // Update cannon position after rotation
+      // Update cannon position after animation change
       this.updateCannonPosition();
+    } else {
+      // Animation disabled - using single ship.png sprite
     }
     
     // Update cannon position and rotation to match the ship
@@ -1914,6 +3003,40 @@ class MainScene extends Phaser.Scene {
       this.updateJoystickInput();
     }
     
+    // Update mouse world position every frame to handle camera movement
+    // This ensures auto-shooting targets stay accurate as camera follows the ship
+    this.updateMouseWorldPosition();
+    
+    // For cornerdefense auto-shooting, send input at a reasonable rate
+    // This ensures server has current mouse target position without overwhelming bandwidth
+    if (this.isCornerDefenseMap && this.useServerAutoShooting && this.ship) {
+      // Initialize throttling variables if not exists
+      if (!this.autoShootInputThrottle) {
+        this.autoShootInputThrottle = {
+          lastSentTime: 0,
+          lastSentTarget: { x: 0, y: 0 },
+          sendInterval: 50 // Send every 50ms (20 FPS) instead of every frame (60 FPS)
+        };
+      }
+      
+      const now = Date.now();
+      const timeSinceLastSent = now - this.autoShootInputThrottle.lastSentTime;
+      
+      // Check if target position has changed significantly
+      const targetChanged = Math.abs(this.currentMouseWorldPos.x - this.autoShootInputThrottle.lastSentTarget.x) > 5 ||
+                           Math.abs(this.currentMouseWorldPos.y - this.autoShootInputThrottle.lastSentTarget.y) > 5;
+      
+      // Send input if enough time has passed OR if target changed significantly
+      if (timeSinceLastSent >= this.autoShootInputThrottle.sendInterval || targetChanged) {
+        this.sendInput();
+        this.autoShootInputThrottle.lastSentTime = now;
+        this.autoShootInputThrottle.lastSentTarget.x = this.currentMouseWorldPos.x;
+        this.autoShootInputThrottle.lastSentTarget.y = this.currentMouseWorldPos.y;
+      }
+    }
+    
+    // Mouse position is now calculated directly when shooting for better accuracy
+    
     // Generate particles based on ship movement
     this.generateParticles();
     
@@ -1927,6 +3050,62 @@ class MainScene extends Phaser.Scene {
     this.sendInput();
   }
 
+  handleAutoShooting(time, delta) {
+    // CLIENT-SIDE AUTO-SHOOTING (Fallback when server-side is disabled)
+    // Note: For cornerdefense map, server-side auto-shooting is preferred for maximum speed
+    
+    // Only auto-shoot if we have the ball
+    if (!this.latestBallState || !this.latestBallState.grabbed || !this.latestBallState.owner) {
+      console.log('Client auto-shooting: No ball state or ball not grabbed');
+      return;
+    }
+    
+    // Check if we are the ball owner
+    if (this.latestBallState.owner !== this.clientId) {
+      console.log('Client auto-shooting: Not ball owner', this.latestBallState.owner, 'vs', this.clientId);
+      return;
+    }
+    
+    // Update auto-shooting cooldown
+    if (this.autoShootCooldown > 0) {
+      this.autoShootCooldown -= delta / 1000;
+      return;
+    }
+    
+    // Ensure we have valid mouse/aim target
+    if (!this.aimTarget || !this.ship) {
+      console.log('Client auto-shooting: No aim target or ship');
+      return;
+    }
+    
+    // Calculate distance to mouse pointer
+    const dx = this.aimTarget.x - this.ship.x;
+    const dy = this.aimTarget.y - this.ship.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    // Only auto-shoot if mouse is far enough away (avoids accidental shots)
+    if (distance < 30) { // Reduced from 50 to 30 for more sensitive shooting
+      console.log('Client auto-shooting: Mouse too close to ship', distance);
+      return;
+    }
+    
+    // Auto-shoot at the current mouse position
+    console.log('🔥 CLIENT AUTO-SHOOTING at mouse position:', this.aimTarget.x.toFixed(1), this.aimTarget.y.toFixed(1), 'distance:', distance.toFixed(1));
+    
+    // Set shoot flag
+    this.inputState.shoot = true;
+    this.sendInput();
+    
+    // Reset shoot flag after a very short delay for ultra-responsive shooting
+    setTimeout(() => {
+      this.inputState.shoot = false;
+      this.sendInput();
+    }, 16); // Just one frame at 60fps for immediate response
+    
+    // Set ultra-short cooldown for maximum responsiveness
+    this.autoShootCooldown = 0.005;
+  }
+
   // Add method to play projectile fired effect
   playProjectileFiredEffect(playerId) {
     // Find the ship that fired the projectile
@@ -1938,6 +3117,20 @@ class MainScene extends Phaser.Scene {
     }
     
     if (!firingShip) return;
+    
+    // Play rocket launch sound - using the working approach
+    try {
+      console.log('🎵 Playing rocket launch sound for projectile by player:', playerId);
+      if (window.testRocketSound) {
+        window.testRocketSound();
+        console.log('✅ Called working testRocketSound for real rocket launch');
+      } else {
+        console.error('❌ testRocketSound not available, trying method');
+        this.playRocketSound();
+      }
+    } catch (soundError) {
+      console.error('❌ Rocket launch sound error:', soundError);
+    }
     
     // Create a muzzle flash effect
     const flash = this.add.circle(firingShip.x, firingShip.y, 15, 0xffff00, 0.8);
@@ -1972,6 +3165,20 @@ class MainScene extends Phaser.Scene {
   
   // Add method to handle explosions
   playExplosionEffect(x, y, radius, playerId) {
+    // Play explosion sound - using the working approach
+    try {
+      console.log('🎵 Playing explosion sound at:', x.toFixed(1), y.toFixed(1), 'radius:', radius, 'player:', playerId);
+      if (window.testExplosionSound) {
+        window.testExplosionSound();
+        console.log('✅ Called working testExplosionSound for real explosion');
+      } else {
+        console.error('❌ testExplosionSound not available, trying method');
+        this.playExplosionSound();
+      }
+    } catch (soundError) {
+      console.error('❌ Explosion sound error:', soundError);
+    }
+    
     // Create explosion flash
     const flash = this.add.circle(x, y, radius, 0xff6600, 0.6);
     flash.setDepth(10);
@@ -2015,212 +3222,239 @@ class MainScene extends Phaser.Scene {
   
   // Update the score display
   updateScoreDisplay() {
-    if (this.serverState.team1_score !== undefined && this.serverState.team2_score !== undefined) {
-      // Update the individual score text objects
-      this.redScoreText.setText(this.serverState.team1_score.toString());
-      this.blueScoreText.setText(this.serverState.team2_score.toString());
+    // Update scores from server state
+    if (this.serverState.team1_score !== undefined) this.team1Score = this.serverState.team1_score;
+    if (this.serverState.team2_score !== undefined) this.team2Score = this.serverState.team2_score;
+    if (this.serverState.team3_score !== undefined) this.team3Score = this.serverState.team3_score;
+    if (this.serverState.team4_score !== undefined) this.team4Score = this.serverState.team4_score;
+    
+    // Create/update the score pie chart at the top center
+    this.createScorePieChart();
+    
+    // Hide legacy score display
+    if (this.scoreLabel) this.scoreLabel.setVisible(false);
+    if (this.redScoreText) this.redScoreText.setVisible(false);
+    if (this.scoreSeparator) this.scoreSeparator.setVisible(false);
+    if (this.blueScoreText) this.blueScoreText.setVisible(false);
+  }
+  
+  // Handle fast projectile creation through fast channel
+  handleFastProjectileCreation(projectileData) {
+    const projectile = projectileData;
+    
+    // Create projectile sprite immediately for instant visibility
+    if (!this.projectiles[projectile.id]) {
+      console.log('⚡ Creating fast projectile:', projectile.id);
       
-      // Reposition the elements to account for changing text widths
-      this.scoreSeparator.x = this.redScoreText.x + this.redScoreText.width;
-      this.blueScoreText.x = this.scoreSeparator.x + this.scoreSeparator.width;
+      // Create new projectile sprite
+      const sprite = this.add.sprite(projectile.x, projectile.y, 'ball');
+      sprite.setScale(0.3); // Make projectiles smaller than the ball
+      sprite.setTint(0xff9900); // Give projectiles a distinct color
+      sprite.setDepth(100);
+      
+      // Add glow effect
+      const glow = this.add.circle(projectile.x, projectile.y, 10, 0xff9900, 0.5);
+      glow.setDepth(95);
+      
+      // Create trail effect
+      const trail = this.add.graphics();
+      
+             this.projectiles[projectile.id] = {
+         sprite: sprite,
+         glow: glow,
+         trail: trail,
+         trailPoints: [], // For trail effect compatibility
+         lastX: projectile.x,
+         lastY: projectile.y,
+         vx: projectile.vx || 0,
+         vy: projectile.vy || 0,
+         lifetime: projectile.lifetime,
+         lastUpdateTime: Date.now(),
+         history: [{ x: projectile.x, y: projectile.y, vx: projectile.vx, vy: projectile.vy, timestamp: Date.now() }]
+       };
     }
   }
   
-  // Add method to update projectiles
-  updateProjectiles(time, delta) {
-    // If we don't have a game state with projectiles, return
-    if (!this.latestGameState || !this.latestGameState.projectiles) {
+  // Handle fast projectile position updates through fast channel
+  handleFastProjectileUpdates(projectilesData) {
+    if (!projectilesData || !Array.isArray(projectilesData)) {
       return;
     }
     
-    // Track existing projectile IDs to remove stale ones
-    const currentProjectileIds = new Set();
-    
-    // Process projectiles from the latest game state
-    this.latestGameState.projectiles.forEach(projectile => {
-      currentProjectileIds.add(projectile.id);
-      
-      // Create or update projectile sprite
-      if (!this.projectiles[projectile.id]) {
-        // Create new projectile sprite
-        const sprite = this.add.sprite(projectile.x, projectile.y, 'ball');
-        sprite.setScale(0.3); // Make projectiles smaller than the ball
-        sprite.setTint(0xff9900); // Give projectiles a distinct color
-        sprite.setDepth(5); // Above ships but below UI
+    projectilesData.forEach(projectile => {
+      if (this.projectiles[projectile.id]) {
+        const proj = this.projectiles[projectile.id];
         
-        // Add a glow effect
-        const glow = this.add.circle(projectile.x, projectile.y, 10, 0xff9900, 0.5);
-        glow.setDepth(4);
+        // Update target position and velocity for smooth interpolation (don't snap immediately)
+        proj.vx = projectile.vx || proj.vx;
+        proj.vy = projectile.vy || proj.vy;
+        proj.lifetime = projectile.lifetime;
         
-        // Store both sprite and glow
-        this.projectiles[projectile.id] = {
-          sprite,
-          glow,
-          trailPoints: [], // For trail effect
-          lastX: projectile.x,
-          lastY: projectile.y,
-          vx: projectile.vx || 0,
-          vy: projectile.vy || 0,
-          lastUpdateTime: time,
-          history: [{ x: projectile.x, y: projectile.y, vx: projectile.vx, vy: projectile.vy, timestamp: time }]
-        };
-      }
-      
-      // Update existing projectile
-      const proj = this.projectiles[projectile.id];
-      
-      // Store velocity for prediction
-      proj.vx = projectile.vx || proj.vx;
-      proj.vy = projectile.vy || proj.vy;
-      
-      // Add to history for interpolation
-      proj.history.push({ 
-        x: projectile.x, 
-        y: projectile.y, 
-        vx: projectile.vx, 
-        vy: projectile.vy, 
-        timestamp: time 
-      });
-      
-      // Keep history limited to prevent memory issues
-      if (proj.history.length > 10) {
-        proj.history.shift();
-      }
-      
-      // Calculate interpolated position
-      const timeSinceLastUpdate = time - proj.lastUpdateTime;
-      const renderDelay = 50; // Small delay for smoother interpolation
-      const renderTime = time - renderDelay;
-      
-      // Find the two closest states in history for interpolation
-      let prev = null, next = null;
-      for (let i = 0; i < proj.history.length - 1; i++) {
-        if (proj.history[i].timestamp <= renderTime && 
-            proj.history[i + 1].timestamp >= renderTime) {
-          prev = proj.history[i];
-          next = proj.history[i + 1];
-          break;
+        // Ensure history array exists (safety check)
+        if (!proj.history) {
+          proj.history = [];
         }
-      }
-      
-      let targetX, targetY;
-      
-      if (prev && next) {
-        // Interpolate between the two states
-        const t = (renderTime - prev.timestamp) / (next.timestamp - prev.timestamp);
-        targetX = Phaser.Math.Linear(prev.x, next.x, t);
-        targetY = Phaser.Math.Linear(prev.y, next.y, t);
-      } else if (proj.history.length > 0) {
-        // Use the latest known position and apply velocity-based prediction
-        const latest = proj.history[proj.history.length - 1];
-        const predictionTime = time - latest.timestamp;
-        targetX = latest.x + (proj.vx * predictionTime / 1000);
-        targetY = latest.y + (proj.vy * predictionTime / 1000);
-      } else {
-        // Fallback to server position
-        targetX = projectile.x;
-        targetY = projectile.y;
-      }
-      
-      // Apply smooth movement (lerp) to the sprite position
-      const smoothingFactor = 0.3; // Adjust for desired smoothness
-      proj.sprite.x = Phaser.Math.Linear(proj.sprite.x, targetX, smoothingFactor);
-      proj.sprite.y = Phaser.Math.Linear(proj.sprite.y, targetY, smoothingFactor);
-      proj.glow.x = proj.sprite.x;
-      proj.glow.y = proj.sprite.y;
-      
-      // Calculate rotation based on velocity
-      if (proj.vx !== 0 || proj.vy !== 0) {
-        proj.sprite.rotation = Math.atan2(proj.vy, proj.vx);
-      }
-      
-      // Add trail effect
-      if (delta > 0) {
-        // Add current position to trail
-        proj.trailPoints.push({ x: proj.sprite.x, y: proj.sprite.y, alpha: 1 });
         
-        // Limit trail length
-        if (proj.trailPoints.length > 10) {
+        // Add to history for smooth interpolation
+        proj.history.push({
+          x: projectile.x,
+          y: projectile.y,
+          vx: projectile.vx,
+          vy: projectile.vy,
+          timestamp: Date.now()
+        });
+        
+        // Keep only recent history (last 3 positions for smooth interpolation)
+        if (proj.history.length > 3) {
+          proj.history.shift();
+        }
+        
+        // Remove if lifetime expired
+        if (projectile.lifetime <= 0) {
+          this.removeProjectile(projectile.id);
+        }
+      } else {
+        // Create projectile if it doesn't exist (in case we missed the creation message)
+        this.handleFastProjectileCreation(projectile);
+      }
+    });
+  }
+  
+  // Helper method to remove projectiles
+  removeProjectile(projectileId) {
+    if (this.projectiles[projectileId]) {
+      console.log('🗑️ Removing projectile:', projectileId);
+      
+      // Clean up sprites
+      if (this.projectiles[projectileId].sprite) {
+        this.projectiles[projectileId].sprite.destroy();
+      }
+      if (this.projectiles[projectileId].glow) {
+        this.projectiles[projectileId].glow.destroy();
+      }
+      if (this.projectiles[projectileId].trail) {
+        this.projectiles[projectileId].trail.destroy();
+      }
+      
+      delete this.projectiles[projectileId];
+    }
+  }
+  
+  // Add method to update projectiles with smooth interpolation
+  updateProjectiles(time, delta) {
+    // Smooth interpolation for all existing projectiles
+    for (const id in this.projectiles) {
+      const proj = this.projectiles[id];
+      
+      if (proj.history && proj.history.length >= 2) {
+        // Use the two most recent positions for simple interpolation
+        const prev = proj.history[proj.history.length - 2];
+        const curr = proj.history[proj.history.length - 1];
+        
+        // Simple fixed smoothing factor for consistent movement
+        const smoothingFactor = 0.2; // Slightly more responsive than ships
+        
+        // Apply smoothing to target position
+        proj.sprite.x = Phaser.Math.Linear(proj.sprite.x, curr.x, smoothingFactor);
+        proj.sprite.y = Phaser.Math.Linear(proj.sprite.y, curr.y, smoothingFactor);
+        proj.glow.x = proj.sprite.x;
+        proj.glow.y = proj.sprite.y;
+        
+        // Calculate rotation based on movement direction
+        const dx = curr.x - prev.x;
+        const dy = curr.y - prev.y;
+        
+        if (dx !== 0 || dy !== 0) {
+          proj.sprite.rotation = Math.atan2(dy, dx);
+        }
+        
+        // Add simple trail effect
+        if (!proj.trailPoints) {
+          proj.trailPoints = [];
+        }
+        
+        // Add current position to trail occasionally (not every frame for performance)
+        if (Math.random() < 0.3) { // 30% chance each frame
+          proj.trailPoints.push({ 
+            x: proj.sprite.x, 
+            y: proj.sprite.y, 
+            alpha: 1.0 
+          });
+        }
+        
+        // Limit trail length and fade out
+        if (proj.trailPoints.length > 8) {
           proj.trailPoints.shift();
         }
         
         // Fade out trail points
-        proj.trailPoints.forEach((point, index) => {
-          point.alpha -= 0.1 * (delta / 16);
+        proj.trailPoints.forEach(point => {
+          point.alpha -= 0.08; // Fade speed
           if (point.alpha < 0) point.alpha = 0;
         });
         
         // Remove fully faded points
-        proj.trailPoints = proj.trailPoints.filter(point => point.alpha > 0);
+        proj.trailPoints = proj.trailPoints.filter(point => point.alpha > 0.1);
         
-        // Draw trail
+        // Draw simple trail
         if (proj.trail) {
           proj.trail.destroy();
         }
         
         if (proj.trailPoints.length > 1) {
           const graphics = this.add.graphics();
-          graphics.setDepth(3);
+          graphics.setDepth(95); // Just below glow
           
-          // Draw trail as a gradient line with smoother curves
-          if (proj.trailPoints.length >= 3) {
-            graphics.lineStyle(3, 0xff9900, 0.7);
-            graphics.beginPath();
-            graphics.moveTo(proj.trailPoints[0].x, proj.trailPoints[0].y);
+          for (let i = 0; i < proj.trailPoints.length - 1; i++) {
+            const point = proj.trailPoints[i];
+            const nextPoint = proj.trailPoints[i + 1];
+            const lineWidth = 2 * point.alpha;
+            const alpha = point.alpha * 0.6;
             
-            // Use curve interpolation for smoother trail
-            for (let i = 1; i < proj.trailPoints.length - 1; i++) {
-              const p1 = proj.trailPoints[i];
-              const p2 = proj.trailPoints[i + 1];
-              const alpha = p1.alpha * 0.7;
-              
-              graphics.lineStyle(3 * alpha, 0xff9900, alpha);
-              graphics.lineTo(p1.x, p1.y);
-            }
-            
-            graphics.lineTo(
-              proj.trailPoints[proj.trailPoints.length - 1].x, 
-              proj.trailPoints[proj.trailPoints.length - 1].y
-            );
-            graphics.strokePath();
-          } else {
-            // Fallback to simple line if not enough points for curve
-            for (let i = 0; i < proj.trailPoints.length - 1; i++) {
-              const p1 = proj.trailPoints[i];
-              const p2 = proj.trailPoints[i + 1];
-              const alpha = p1.alpha * 0.5;
-              
-              graphics.lineStyle(3 * alpha, 0xff9900, alpha);
-              graphics.lineBetween(p1.x, p1.y, p2.x, p2.y);
-            }
+            graphics.lineStyle(lineWidth, 0xff9900, alpha);
+            graphics.lineBetween(point.x, point.y, nextPoint.x, nextPoint.y);
           }
           
           proj.trail = graphics;
         }
+      } else if (proj.history && proj.history.length === 1) {
+        // Single position - just move towards it
+        const target = proj.history[0];
+        const smoothingFactor = 0.15;
+        
+        proj.sprite.x = Phaser.Math.Linear(proj.sprite.x, target.x, smoothingFactor);
+        proj.sprite.y = Phaser.Math.Linear(proj.sprite.y, target.y, smoothingFactor);
+        proj.glow.x = proj.sprite.x;
+        proj.glow.y = proj.sprite.y;
       }
       
-      // Store last position and update time
-      proj.lastX = proj.sprite.x;
-      proj.lastY = proj.sprite.y;
-      proj.lastUpdateTime = time;
-    });
-    
-    // Remove projectiles that are no longer in the game state
-    Object.keys(this.projectiles).forEach(id => {
-      if (!currentProjectileIds.has(parseInt(id))) {
-        // Clean up projectile sprites
-        if (this.projectiles[id].sprite) {
-          this.projectiles[id].sprite.destroy();
-        }
-        if (this.projectiles[id].glow) {
-          this.projectiles[id].glow.destroy();
-        }
-        if (this.projectiles[id].trail) {
-          this.projectiles[id].trail.destroy();
-        }
-        delete this.projectiles[id];
+      // Limit history size to improve performance
+      if (proj.history && proj.history.length > 3) {
+        proj.history = proj.history.slice(-3);
       }
-    });
+    }
+    
+    // Handle projectiles from reliable channel (if any)
+    if (this.latestGameState && this.latestGameState.projectiles) {
+      const currentProjectileIds = new Set();
+      
+      // Process projectiles from the latest game state
+      this.latestGameState.projectiles.forEach(projectile => {
+        currentProjectileIds.add(projectile.id);
+        
+        // Only update if we don't already have this projectile (fast channel handles existing ones)
+        if (!this.projectiles[projectile.id]) {
+          this.handleFastProjectileCreation(projectile);
+        }
+      });
+      
+      // Remove projectiles that are no longer in the game state
+      Object.keys(this.projectiles).forEach(id => {
+        if (!currentProjectileIds.has(parseInt(id))) {
+          this.removeProjectile(parseInt(id));
+        }
+      });
+    }
   }
   
   // Update the updateTeamDisplay method to handle both formats of team names
@@ -2228,14 +3462,25 @@ class MainScene extends Phaser.Scene {
     if (team) {
       // Normalize team name format (could be 'Red'/'Blue' or 'red'/'blue')
       const normalizedTeam = typeof team === 'string' ? team.toLowerCase() : team;
-      const displayTeam = typeof team === 'string' ? team : (normalizedTeam === 'red' ? 'Red' : 'Blue');
+      let displayTeam = typeof team === 'string' ? team : normalizedTeam;
+      
+      // Ensure proper capitalization
+      if (normalizedTeam === 'red') displayTeam = 'Red';
+      else if (normalizedTeam === 'blue') displayTeam = 'Blue'; 
+      else if (normalizedTeam === 'yellow') displayTeam = 'Yellow';
+      else if (normalizedTeam === 'green') displayTeam = 'Green';
       
       console.log(`Updating team display to: ${displayTeam} (normalized: ${normalizedTeam})`);
       
       this.teamText.setText(`Team: ${displayTeam}`);
       
       // Set color based on team
-      const teamColor = normalizedTeam === 'red' ? '#ff0000' : '#0000ff';
+      let teamColor = '#ffffff';
+      if (normalizedTeam === 'red') teamColor = '#ff0000';
+      else if (normalizedTeam === 'blue') teamColor = '#0000ff';
+      else if (normalizedTeam === 'yellow') teamColor = '#ffdc00';
+      else if (normalizedTeam === 'green') teamColor = '#00c800';
+      
       this.teamText.setStyle({ font: "16px Arial", fill: teamColor });
       
       // Store the current team
@@ -2245,55 +3490,10 @@ class MainScene extends Phaser.Scene {
   
   // Add method to show goal animation
   showGoalAnimation(scorerTeam) {
-    console.log(`Showing goal animation for team: ${scorerTeam}`);
-    
-    // Normalize team name
-    const normalizedTeam = typeof scorerTeam === 'string' ? scorerTeam.toLowerCase() : scorerTeam;
-    
-    // Create a goal text that fades out
-    const teamColor = normalizedTeam === 'red' ? '#ff0000' : '#0000ff';
-    const opposingTeam = normalizedTeam === 'red' ? 'BLUE' : 'RED';
-    const opposingColor = normalizedTeam === 'red' ? '#0000ff' : '#ff0000';
-    
-    // Create a background rectangle for better visibility
-    const bgRect = this.add.rectangle(
-      this.cameras.main.centerX,
-      this.cameras.main.centerY,
-      600,
-      150,
-      0x000000,
-      0.7
-    ).setScrollFactor(0).setOrigin(0.5);
-    
-    // Create the main goal text
-    const goalText = this.add.text(
-      this.cameras.main.centerX, 
-      this.cameras.main.centerY - 20, 
-      `GOAL!`, 
-      { font: 'bold 48px Arial', fill: '#ffffff', align: 'center' }
-    ).setOrigin(0.5).setScrollFactor(0);
-    
-    // Create the team scored text
-    const teamText = this.add.text(
-      this.cameras.main.centerX, 
-      this.cameras.main.centerY + 30, 
-      `${normalizedTeam.toUpperCase()} TEAM SCORED`, 
-      { font: 'bold 32px Arial', fill: teamColor, align: 'center' }
-    ).setOrigin(0.5).setScrollFactor(0);
-    
-    // Add a tween to make the text and background fade out
-    this.tweens.add({
-      targets: [bgRect, goalText, teamText],
-      alpha: 0,
-      y: '-=50',
-      duration: 2000,
-      ease: 'Power2',
-      onComplete: () => {
-        bgRect.destroy();
-        goalText.destroy();
-        teamText.destroy();
-      }
-    });
+    // DISABLED: This method was causing stuck UI elements
+    // Goals are now shown via simple notifications instead
+    console.log(`Goal animation disabled for team: ${scorerTeam}`);
+    return;
   }
 
   updateBoostCircle() {
@@ -2399,14 +3599,27 @@ class MainScene extends Phaser.Scene {
       this.cameras.main.setSize(gameSize.width, gameSize.height);
     }
     
-    // Reset joystick if active
-    if (this.isMobile && this.joystickActive) {
-      this.joystickContainer.setVisible(false);
-      this.joystickActive = false;
-      this.joystickTouchId = null;
-      this.joystickForce = 0;
-      this.joystickForceX = 0;
-      this.joystickForceY = 0;
+    // Reset dual joysticks if active
+    if (this.isMobile) {
+      // Reset left joystick
+      if (this.leftJoystickActive) {
+        this.leftJoystickContainer.setVisible(false);
+        this.leftJoystickLabel.setVisible(false);
+        this.leftJoystickActive = false;
+        this.leftJoystickTouchId = null;
+        this.leftJoystickForceX = 0;
+        this.leftJoystickForceY = 0;
+      }
+      
+      // Reset right joystick
+      if (this.rightJoystickActive) {
+        this.rightJoystickContainer.setVisible(false);
+        this.rightJoystickLabel.setVisible(false);
+        this.rightJoystickActive = false;
+        this.rightJoystickTouchId = null;
+        this.rightJoystickForceX = 0;
+        this.rightJoystickForceY = 0;
+      }
       
       // Reset input state
       this.inputState.left = false;
@@ -2458,9 +3671,9 @@ class MainScene extends Phaser.Scene {
       }
     }
     
+    // Team text position is fixed and doesn't need repositioning on resize
     if (this.teamText) {
-      this.teamText.setScrollFactor(0);
-      this.teamText.setPosition(10, 70);
+      this.teamText.setScrollFactor(0); // Ensure it stays fixed to screen
     }
     
     // Reposition countdown text to center of screen
@@ -2567,7 +3780,47 @@ class MainScene extends Phaser.Scene {
     // Update scores
     this.team1Score = message.team1_score;
     this.team2Score = message.team2_score;
+    this.team3Score = message.team3_score || 0;
+    this.team4Score = message.team4_score || 0;
     this.updateScoreDisplay();
+    
+    // Reset ball state to ensure it's visible and not grabbed
+    if (this.ball) {
+      this.ball.grabbed = false;
+      this.ball.owner = null;
+      this.ball.setVisible(true);
+    }
+    
+    // Clear ball history to prevent old positions from affecting display
+    this.ballHistory = [];
+    this.latestBallState = null;
+    
+    // WORKAROUND: Reset input sequence to sync with server
+    this.inputSequence = 1;
+    
+    // WORKAROUND: Clear input state to prevent stuck inputs
+    this.inputState = {
+      left: false,
+      right: false, 
+      up: false,
+      down: false,
+      shoot: false,
+      boost: false
+    };
+    
+    // WORKAROUND: Force send a fresh input after countdown
+    this.time.delayedCall(6500, () => {
+      this.sendInput();
+    });
+    
+    // Ensure player movement will be re-enabled after countdown
+    // (This is a backup in case countdown messages are missed)
+    this.time.delayedCall(6000, () => {
+      this.playerCanMove = true;
+      if (this.countdownText) {
+        this.countdownText.setVisible(false);
+      }
+    });
     
     // Show reset notification
     this.showNotification('Game has been reset!', false);
@@ -2575,10 +3828,12 @@ class MainScene extends Phaser.Scene {
   
   // Add method to show notifications
   showNotification(message, isError = false) {
+    console.log("showNotification called with message:", message);
     // Create notification container if it doesn't exist
     if (!this.notificationContainer) {
       this.notificationContainer = this.add.container(this.cameras.main.width / 2, 150);
       this.notificationContainer.setDepth(1000);
+      console.log("Created notification container at:", this.cameras.main.width / 2, 150);
     }
     
     // Clear any existing notifications
@@ -2627,6 +3882,20 @@ class MainScene extends Phaser.Scene {
     }
     
     if (!shooterShip) return;
+    
+    // Play shoot sound - using the working approach
+    try {
+      console.log('🎵 Playing shoot sound for shot by player:', playerId);
+      if (window.testShootSound) {
+        window.testShootSound();
+        console.log('✅ Called working testShootSound for real shot');
+      } else {
+        console.error('❌ testShootSound not available, trying method');
+        this.playShootSound();
+      }
+    } catch (soundError) {
+      console.error('❌ Shoot sound error:', soundError);
+    }
     
     // Create a flash effect
     const flash = this.add.circle(shooterShip.x, shooterShip.y, 30, 0xffffff, 0.8);
@@ -3126,17 +4395,7 @@ class MainScene extends Phaser.Scene {
           return;
         }
         
-        // Handle goal event
-        if (msg.type === "goal") {
-          this.serverState.team1_score = msg.team1_score;
-          this.serverState.team2_score = msg.team2_score;
-          this.updateScoreDisplay();
-          
-          // Show goal animation with team color
-          const scorerTeam = msg.scorer_team;
-          this.showGoalAnimation(scorerTeam);
-          return;
-        }
+
         
         // Handle game state update
         const serverTimestamp = msg.time;
@@ -3165,6 +4424,10 @@ class MainScene extends Phaser.Scene {
                 this.ship.setTint(0xff0000); // Red tint
               } else if (msg.players[this.clientId].team === 'Blue') {
                 this.ship.setTint(0x0000ff); // Blue tint
+              } else if (msg.players[this.clientId].team === 'Yellow') {
+                this.ship.setTint(0xffdc00); // Yellow tint
+              } else if (msg.players[this.clientId].team === 'Green') {
+                this.ship.setTint(0x00c800); // Green tint
               }
               
               // Update team display
@@ -3180,9 +4443,9 @@ class MainScene extends Phaser.Scene {
             
             if (!this.otherShips[id]) {
               console.log(`Creating new ship for player ${id}`);
-              // Create new ship sprite
+              // Create new ship sprite using ship.png
               const sprite = this.add.sprite(shipState.x, shipState.y, 'ship')
-                .setScale(0.09)
+                .setScale(0.1)
                 .setOrigin(0.5);
               
               // Set ship color based on team
@@ -3190,6 +4453,10 @@ class MainScene extends Phaser.Scene {
                 sprite.setTint(0xff0000); // Red tint
               } else if (shipState.team === 'Blue') {
                 sprite.setTint(0x0000ff); // Blue tint
+              } else if (shipState.team === 'Yellow') {
+                sprite.setTint(0xffdc00); // Yellow tint
+              } else if (shipState.team === 'Green') {
+                sprite.setTint(0x00c800); // Green tint
               }
               
               // Store the current team for change detection
@@ -3236,6 +4503,10 @@ class MainScene extends Phaser.Scene {
                   sprite.setTint(0xff0000); // Red tint
                 } else if (shipState.team === 'Blue') {
                   sprite.setTint(0x0000ff); // Blue tint
+                } else if (shipState.team === 'Yellow') {
+                  sprite.setTint(0xffdc00); // Yellow tint
+                } else if (shipState.team === 'Green') {
+                  sprite.setTint(0x00c800); // Green tint
                 }
               }
               
@@ -3290,7 +4561,7 @@ class MainScene extends Phaser.Scene {
             // Store ball properties for use in updateBoostCircle
             if (!this.ball) {
               this.ball = this.add.sprite(400, 300, 'ball');
-              this.ball.setDepth(5);
+              this.ball.setDepth(16); // Set consistent with free ball depth (above players and cannons)
             }
             this.ball.grabbed = msg.ball.grabbed;
             this.ball.owner = msg.ball.owner;
@@ -3315,11 +4586,10 @@ class MainScene extends Phaser.Scene {
         }
         
         // Update scores
-        if (msg.team1_score !== undefined && msg.team2_score !== undefined) {
-          this.serverState.team1_score = msg.team1_score;
-          this.serverState.team2_score = msg.team2_score;
-          this.updateScoreDisplay();
-        }
+        if (msg.team1_score !== undefined) this.team1Score = msg.team1_score;
+        if (msg.team2_score !== undefined) this.team2Score = msg.team2_score;
+        if (msg.team3_score !== undefined) this.team3Score = msg.team3_score;
+        if (msg.team4_score !== undefined) this.team4Score = msg.team4_score;
       } catch (error) {
         console.error('Error processing message:', error);
       }
@@ -3330,11 +4600,44 @@ class MainScene extends Phaser.Scene {
   updateCannonPosition() {
     if (!this.cannon || !this.ship) return;
     
-    // Always position the cannon in front of the ship based on its rotation
-    const cannonDistance = 4; // Distance from ship center to cannon position
-    this.cannon.x = this.ship.x + Math.cos(this.ship.rotation) * cannonDistance;
-    this.cannon.y = this.ship.y + Math.sin(this.ship.rotation) * cannonDistance;
-    this.cannon.rotation = this.ship.rotation;
+    // For the player's cannon, use mouse aim direction or aimTarget for mobile
+    let direction = { x: 0, y: 1 }; // Default to down
+    
+    if (this.input.activePointer) {
+      // Use Phaser 3 activePointer for mouse world coordinates
+      const mouseWorldX = this.input.activePointer.worldX;
+      const mouseWorldY = this.input.activePointer.worldY;
+      
+      // Calculate direction from ship to mouse position
+      const dx = mouseWorldX - this.ship.x;
+      const dy = mouseWorldY - this.ship.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      if (distance > 0) {
+        direction = { x: dx / distance, y: dy / distance };
+      }
+    } else if (this.aimTarget && this.aimTarget.x !== undefined && this.aimTarget.y !== undefined) {
+      // Use aimTarget for mobile devices
+      const dx = this.aimTarget.x - this.ship.x;
+      const dy = this.aimTarget.y - this.ship.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      if (distance > 0) {
+        direction = { x: dx / distance, y: dy / distance };
+      }
+    } else {
+      // Fallback to character direction if no mouse input or aimTarget
+      direction = this.getCannonPosition(this.ship);
+    }
+    
+    // Position the cannon in front of the ship based on direction
+    const cannonDistance = 24; // Distance from ship center to cannon position
+    this.cannon.x = this.ship.x + direction.x * cannonDistance;
+    this.cannon.y = this.ship.y + direction.y * cannonDistance;
+    
+    // Calculate rotation angle for the cannon
+    const angle = Math.atan2(direction.y, direction.x);
+    this.cannon.rotation = angle;
     
     // Make the cannon more visible when rocket is ready
     if (this.serverState.ship && this.serverState.ship.rocket_cooldown === 0) {
@@ -3343,6 +4646,282 @@ class MainScene extends Phaser.Scene {
       this.cannon.clearTint();
     }
   }
+  
+  // Helper method to get direction from movement vector
+  getDirectionFromVector(direction) {
+    if (Math.abs(direction.x) > Math.abs(direction.y)) {
+      return direction.x > 0 ? 'right' : 'left';
+    } else {
+      return direction.y > 0 ? 'down' : 'up';
+    }
+  }
+  
+  // Helper method to convert discrete direction to vector
+  getDirectionVector(direction) {
+    switch (direction) {
+      case 'up': return { x: 0, y: -1 };
+      case 'down': return { x: 0, y: 1 };
+      case 'left': return { x: -1, y: 0 };
+      case 'right': return { x: 1, y: 0 };
+      default: return { x: 0, y: 0 };
+    }
+  }
+  
+  // Helper method to update ship animation based on movement
+  updateShipAnimation(sprite, direction, isMoving = false) {
+    // Animation disabled - using single ship.png sprite
+    // Just store the direction for cannon positioning
+    if (sprite) {
+      sprite.lastDirection = direction;
+    }
+  }
+  
+  // Helper method to get cannon position based on stored direction
+  getCannonPosition(sprite) {
+    if (!sprite || !sprite.lastDirection) {
+      return { x: 0, y: 1 }; // Default to down
+    }
+    
+    // Use stored direction from updateShipAnimation
+    const direction = sprite.lastDirection;
+    
+    // Normalize the direction for cannon positioning
+    const length = Math.sqrt(direction.x * direction.x + direction.y * direction.y);
+    if (length > 0) {
+      return { x: direction.x / length, y: direction.y / length };
+    }
+    
+    return { x: 0, y: 1 }; // Default to down
+  }
+  
+  // Helper method to get ball offset position based on character's stored direction
+  getBallOffsetPosition(sprite) {
+    // Always center the ball on the ship when grabbed
+    return { x: 0, y: 0 };
+  }
+
+  updateTeamDisplay(team) {
+    const teamColors = {
+      'Red': '#ff0000',
+      'Blue': '#0078ff',
+      'Yellow': '#ffdc00',
+      'Green': '#00c800'
+    };
+    
+    if (team && teamColors[team]) {
+      const teamText = this.add.text(10, 10, `Team: ${team}`, {
+        fontSize: '24px',
+        fill: teamColors[team]
+      });
+      teamText.setScrollFactor(0);
+      teamText.setDepth(1000);
+      
+      if (this.teamText) {
+        this.teamText.destroy();
+      }
+      this.teamText = teamText;
+    }
+  }
+
+  // Add method to show goal animation
+  showGoalAnimation(scorerTeam) {
+    // DISABLED: This method was causing stuck UI elements
+    // Goals are now shown via simple notifications instead
+    console.log(`Goal animation disabled for team: ${scorerTeam}`);
+    return;
+  }
+
+  createScorePieChart() {
+    // Clean up existing score pie chart
+    if (this.scorePieChart) this.scorePieChart.destroy();
+    if (this.scorePieTexts) this.scorePieTexts.forEach(t => t.destroy());
+    if (this.scorePieTitle) this.scorePieTitle.destroy();
+    
+    // Create new score pie chart
+    this.scorePieChart = this.add.graphics();
+    this.scorePieTexts = [];
+    
+    // Position at top center of screen
+    const centerX = this.cameras.main.centerX;
+    const centerY = 80; // Top of screen
+    const radius = 50;
+    
+    // Team data with scores
+    const teams = [
+      { name: 'Red', color: 0xff0000, score: this.team1Score || 0 },
+      { name: 'Blue', color: 0x0078ff, score: this.team2Score || 0 },
+      { name: 'Yellow', color: 0xffdc00, score: this.team3Score || 0 },
+      { name: 'Green', color: 0x00c800, score: this.team4Score || 0 },
+    ];
+    
+    // Calculate total score for proportional slices
+    const totalScore = teams.reduce((sum, team) => sum + team.score, 0);
+    
+    // If no scores yet, show equal slices
+    if (totalScore === 0) {
+      const anglePer = (2 * Math.PI) / teams.length;
+      teams.forEach((team, i) => {
+        const startAngle = i * anglePer - Math.PI/2;
+        const endAngle = startAngle + anglePer;
+        
+        this.scorePieChart.beginPath();
+        this.scorePieChart.moveTo(centerX, centerY);
+        this.scorePieChart.arc(centerX, centerY, radius, startAngle, endAngle, false);
+        this.scorePieChart.closePath();
+        this.scorePieChart.fillStyle(team.color, 0.8);
+        this.scorePieChart.fillPath();
+        this.scorePieChart.lineStyle(2, 0xffffff, 1);
+        this.scorePieChart.strokePath();
+        
+        // Add team name and score
+        const midAngle = (startAngle + endAngle) / 2;
+        const textX = centerX + Math.cos(midAngle) * (radius * 0.7);
+        const textY = centerY + Math.sin(midAngle) * (radius * 0.7);
+        const text = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
+          font: 'bold 12px Arial',
+          fill: '#fff',
+          align: 'center',
+          stroke: '#000',
+          strokeThickness: 2
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+        this.scorePieTexts.push(text);
+      });
+    } else {
+      // Show proportional slices based on scores
+      let currentAngle = -Math.PI/2; // Start at top
+      teams.forEach((team) => {
+        const proportion = team.score / totalScore;
+        const sliceAngle = proportion * 2 * Math.PI;
+        const endAngle = currentAngle + sliceAngle;
+        
+        if (sliceAngle > 0) {
+          this.scorePieChart.beginPath();
+          this.scorePieChart.moveTo(centerX, centerY);
+          this.scorePieChart.arc(centerX, centerY, radius, currentAngle, endAngle, false);
+          this.scorePieChart.closePath();
+          this.scorePieChart.fillStyle(team.color, 0.8);
+          this.scorePieChart.fillPath();
+          this.scorePieChart.lineStyle(2, 0xffffff, 1);
+          this.scorePieChart.strokePath();
+          
+          // Add team name and score at the middle of the slice
+          const midAngle = (currentAngle + endAngle) / 2;
+          const textX = centerX + Math.cos(midAngle) * (radius * 0.7);
+          const textY = centerY + Math.sin(midAngle) * (radius * 0.7);
+          const text = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
+            font: 'bold 12px Arial',
+            fill: '#fff',
+            align: 'center',
+            stroke: '#000',
+            strokeThickness: 2
+          }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+          this.scorePieTexts.push(text);
+        }
+        
+        currentAngle = endAngle;
+      });
+    }
+    
+    // Add title
+    this.scorePieTitle = this.add.text(centerX, centerY - radius - 20, 'TEAM SCORES', {
+      font: 'bold 16px Arial',
+      fill: '#ffffff',
+      align: 'center',
+      stroke: '#000',
+      strokeThickness: 2
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+    
+    this.scorePieChart.setScrollFactor(0).setDepth(1000);
+  }
+
+  createTeamPieMenu() {
+    if (this.teamPieMenu) this.teamPieMenu.destroy();
+    if (this.teamSwitchTexts) this.teamSwitchTexts.forEach(t => t.destroy());
+    if (this.teamPieHits) this.teamPieHits.forEach(h => h.destroy());
+    this.teamPieMenu = this.add.graphics();
+    this.teamSwitchTexts = [];
+    this.teamPieHits = [];
+    const centerX = 120, centerY = 120, radius = 90;
+    const teams = [
+      { name: 'Red', color: 0xff0000, score: this.team1Score || 0, key: 'red' },
+      { name: 'Blue', color: 0x0078ff, score: this.team2Score || 0, key: 'blue' },
+      { name: 'Yellow', color: 0xffdc00, score: this.team3Score || 0, key: 'yellow' },
+      { name: 'Green', color: 0x00c800, score: this.team4Score || 0, key: 'green' },
+    ];
+    const anglePer = (2 * Math.PI) / teams.length;
+    teams.forEach((team, i) => {
+      const startAngle = i * anglePer - Math.PI/2;
+      const endAngle = startAngle + anglePer;
+      this.teamPieMenu.beginPath();
+      this.teamPieMenu.moveTo(centerX, centerY);
+      this.teamPieMenu.arc(centerX, centerY, radius, startAngle, endAngle, false);
+      this.teamPieMenu.closePath();
+      this.teamPieMenu.fillStyle(team.color, this.playerTeam === team.key ? 1 : 0.7);
+      this.teamPieMenu.fillPath();
+      // Add team name and score text
+      const midAngle = (startAngle + endAngle) / 2;
+      const textX = centerX + Math.cos(midAngle) * (radius * 0.65);
+      const textY = centerY + Math.sin(midAngle) * (radius * 0.65);
+      const t = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
+        font: 'bold 18px Arial',
+        fill: '#fff',
+        align: 'center',
+        stroke: '#000',
+        strokeThickness: 3
+      }).setOrigin(0.5).setDepth(1001);
+      this.teamSwitchTexts.push(t);
+      // Add interactive area for switching
+      const hit = this.add.zone(centerX, centerY, radius*2, radius*2).setOrigin(0.5).setInteractive();
+      hit.on('pointerdown', pointer => {
+        // Check if pointer is in this slice
+        const dx = pointer.x - centerX;
+        const dy = pointer.y - centerY;
+        const angle = Math.atan2(dy, dx);
+        let a = angle < -Math.PI/2 ? angle + 2*Math.PI : angle;
+        if (a >= startAngle && a < endAngle) {
+          if (this.playerTeam !== team.key) {
+            this.showTeamSwitchConfirm(team.key, team.name);
+          }
+        }
+      });
+      hit.setDepth(1000);
+      this.teamPieHits.push(hit);
+    });
+    this.teamPieMenu.setDepth(999);
+  };
+
+  // 3. Add confirmation dialog for team switching
+  showTeamSwitchConfirm(teamKey, teamName) {
+    if (this.teamSwitchDialog) this.teamSwitchDialog.destroy();
+    if (this.teamSwitchText) this.teamSwitchText.destroy();
+    if (this.teamSwitchYes) this.teamSwitchYes.destroy();
+    if (this.teamSwitchNo) this.teamSwitchNo.destroy();
+    const w = 220, h = 110;
+    const x = 120, y = 120;
+    this.teamSwitchDialog = this.add.rectangle(x, y, w, h, 0x222222, 0.95).setOrigin(0.5).setDepth(2000);
+    this.teamSwitchText = this.add.text(x, y-20, `Switch to ${teamName} team?`, {
+      font: 'bold 18px Arial', fill: '#fff', align: 'center'
+    }).setOrigin(0.5).setDepth(2001);
+    this.teamSwitchYes = this.add.text(x-40, y+20, 'Yes', {
+      font: 'bold 20px Arial', fill: '#0f0', backgroundColor: '#222', padding: { left: 10, right: 10, top: 4, bottom: 4 }
+    }).setOrigin(0.5).setInteractive().setDepth(2001);
+    this.teamSwitchNo = this.add.text(x+40, y+20, 'No', {
+      font: 'bold 20px Arial', fill: '#f00', backgroundColor: '#222', padding: { left: 10, right: 10, top: 4, bottom: 4 }
+    }).setOrigin(0.5).setInteractive().setDepth(2001);
+    this.teamSwitchYes.on('pointerdown', () => {
+      this.switchTeam(teamKey);
+      this.hideTeamSwitchConfirm();
+    });
+    this.teamSwitchNo.on('pointerdown', () => {
+      this.hideTeamSwitchConfirm();
+    });
+  };
+  hideTeamSwitchConfirm() {
+    if (this.teamSwitchDialog) this.teamSwitchDialog.destroy();
+    if (this.teamSwitchText) this.teamSwitchText.destroy();
+    if (this.teamSwitchYes) this.teamSwitchYes.destroy();
+    if (this.teamSwitchNo) this.teamSwitchNo.destroy();
+  };
 }
   
 const config = {
@@ -3373,15 +4952,17 @@ const config = {
   dom: {
     createContainer: true
   },
-  plugins: {
-    global: [
-      {
-        key: 'rexVirtualJoystick',
-        plugin: rexvirtualjoystickplugin,
-        start: true
-      }
-    ]
-  },
+  // Note: Virtual joystick plugin disabled to avoid dependency issues
+  // You can enable it by including the rex virtual joystick plugin
+  // plugins: {
+  //   global: [
+  //     {
+  //       key: 'rexVirtualJoystick',
+  //       plugin: rexvirtualjoystickplugin,
+  //       start: true
+  //     }
+  //   ]
+  // },
   scene: MainScene
 };
   
@@ -3415,3 +4996,18 @@ if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(naviga
 }
 
 const game = new Phaser.Game(config);
+
+// After the class MainScene { ... } ends
+
+// Patch updateScoreDisplay and updateTeamDisplay to call createTeamPieMenu
+const oldUpdateScoreDisplay = MainScene.prototype.updateScoreDisplay;
+MainScene.prototype.updateScoreDisplay = function() {
+  if (oldUpdateScoreDisplay) oldUpdateScoreDisplay.call(this);
+  this.createTeamPieMenu();
+};
+
+const oldUpdateTeamDisplay = MainScene.prototype.updateTeamDisplay;
+MainScene.prototype.updateTeamDisplay = function(team) {
+  if (oldUpdateTeamDisplay) oldUpdateTeamDisplay.call(this, team);
+  this.createTeamPieMenu();
+};

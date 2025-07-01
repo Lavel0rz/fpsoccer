@@ -188,6 +188,25 @@ impl LobbyManager {
             println!("Cleanup: Removing empty game with ID: {}", game_id);
             self.games.remove(&game_id);
         }
+        
+        // Also clean up any disconnected clients
+        let disconnected_clients: Vec<String> = self.clients.iter()
+            .filter(|(_, client)| {
+                if let Ok(sender) = client.try_lock() {
+                    return sender.is_closed();
+                }
+                true
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for client_id in disconnected_clients {
+            println!("Cleanup: Removing disconnected client: {}", client_id);
+            self.clients.remove(&client_id);
+        }
+        
+        // Print resource usage after cleanup
+        self.debug_print_resources();
     }
 
     // Debug method to print all game instances
@@ -202,6 +221,20 @@ impl LobbyManager {
             }
         }
         println!("===================================");
+    }
+
+    // Add debug method to print resource usage
+    pub fn debug_print_resources(&self) {
+        println!("=== Resource Usage Report ===");
+        println!("Active Games: {}", self.games.len());
+        println!("Active Clients: {}", self.clients.len());
+        
+        // Print details of each game
+        for (id, game) in &self.games {
+            println!("Game {}: Players={}, Max={}, Public={}", 
+                id, game.player_count, game.max_players, game.is_public);
+        }
+        println!("===========================");
     }
 }
 
@@ -430,8 +463,8 @@ pub async fn game_update_loop_for_instance(game: Arc<Mutex<Game>>) {
     let game_for_loop = game.clone();
     tokio::spawn(async move {
         println!("Game update loop started");
-        let fixed_dt = 0.1;
-        let sub_steps = 5;
+        let fixed_dt = 0.1; // Match main game's update rate
+        let sub_steps = 10; // Match main game's physics steps
         let _sub_dt = fixed_dt / sub_steps as f32;
         let game_width = 2000.0;
         let game_height = 1200.0;
@@ -442,7 +475,11 @@ pub async fn game_update_loop_for_instance(game: Arc<Mutex<Game>>) {
         loop {
             {
                 let mut game = game_for_loop.lock().await;
-                game.update(fixed_dt, game_width, game_height);
+                
+                // Only update if there are active players
+                if !game.players.is_empty() {
+                    game.update(fixed_dt, game_width, game_height, None);
+                }
                 
                 // Check if the game is empty
                 if game.players.is_empty() {
@@ -452,13 +489,14 @@ pub async fn game_update_loop_for_instance(game: Arc<Mutex<Game>>) {
             
             // Periodically check for empty games in the lobby manager
             cleanup_counter += 1;
-            if cleanup_counter >= 100 { // Check every ~10 seconds (100 * 0.1s)
+            if cleanup_counter >= 200 {
                 cleanup_counter = 0;
                 if let Ok(mut lobby) = LOBBY_MANAGER.try_lock() {
                     lobby.cleanup_empty_games();
                 }
             }
             
+            // Match the main game's sleep timing
             tokio::time::sleep(tokio::time::Duration::from_millis((fixed_dt * 700.0) as u64)).await;
         }
     });
