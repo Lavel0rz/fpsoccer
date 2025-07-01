@@ -63,7 +63,7 @@ impl Projectile {
             vx,
             vy,
             owner_id,
-            lifetime: 2.0,  // 2 seconds before auto-explosion
+            lifetime: 3.0,  // 3 seconds before auto-explosion (increased by 1 second)
             active: true,
         }
     }
@@ -111,6 +111,16 @@ pub struct Game {
 }
 
 impl Game {
+    // Helper function to detect if we're using the soccer map (only Red and Blue goals)
+    fn is_soccer_map() -> bool {
+        // Check if there are any Yellow or Green goals in the map
+        let has_yellow_goals = MAP_OBJECTS.iter().any(|obj| obj.obj_type == "goal_yellow");
+        let has_green_goals = MAP_OBJECTS.iter().any(|obj| obj.obj_type == "goal_green");
+        
+        // Soccer map = no Yellow or Green goals
+        !has_yellow_goals && !has_green_goals
+    }
+
     pub fn new() -> Self {
         // Calculate the middle of the game area
         let game_width = 1600.0;
@@ -152,15 +162,25 @@ impl Game {
     
     // Add a method to determine which team a new player should join
     pub fn assign_team(&mut self) -> Team {
-        // For corner defense mode: limit to 1 player per team
-        let max_players_per_team = 1;
+        // For corner defense mode: limit to 3 players per team
+        let max_players_per_team = 3;
         
-        let team_counts = [
-            (Team::Red, self.red_team_count),
-            (Team::Blue, self.blue_team_count),
-            (Team::Yellow, self.yellow_team_count),
-            (Team::Green, self.green_team_count),
-        ];
+        let team_counts = if Self::is_soccer_map() {
+            // Soccer map: only Red and Blue teams
+            println!("Soccer map detected - limiting teams to Red and Blue only");
+            vec![
+                (Team::Red, self.red_team_count),
+                (Team::Blue, self.blue_team_count),
+            ]
+        } else {
+            // Corner defense map: all four teams
+            vec![
+                (Team::Red, self.red_team_count),
+                (Team::Blue, self.blue_team_count),
+                (Team::Yellow, self.yellow_team_count),
+                (Team::Green, self.green_team_count),
+            ]
+        };
         
         // Find team with lowest count that hasn't reached the limit
         let available_teams: Vec<_> = team_counts.iter()
@@ -192,7 +212,18 @@ impl Game {
     
     // Add method to check if a team can accept new players
     pub fn can_join_team(&self, team: Team) -> bool {
-        let max_players_per_team = 1; // For corner defense mode
+        // Check if team is allowed on this map
+        if Self::is_soccer_map() {
+            match team {
+                Team::Yellow | Team::Green => {
+                    println!("Team {:?} not allowed on soccer map", team);
+                    return false;
+                },
+                _ => {} // Red and Blue are allowed
+            }
+        }
+        
+        let max_players_per_team = 3; // For corner defense mode
         
         let current_count = match team {
             Team::Red => self.red_team_count,
@@ -553,8 +584,8 @@ impl Game {
                     player.input.boost = false;
                     println!("Reset boost flag for player {}", player.id);
                     
-                    // Apply recoil to the player
-                    let recoil_factor = 0.3;
+                    // Apply recoil to the player (doubled for more impact!)
+                    let recoil_factor = 0.6; // Increased from 0.3 to 0.6 (2x more recoil)
                     player.velocity.0 -= dir_x * projectile_speed * recoil_factor;
                     player.velocity.1 -= dir_y * projectile_speed * recoil_factor;
                     
@@ -569,7 +600,7 @@ impl Game {
                             "vx": total_vx,
                             "vy": total_vy,
                             "owner_id": player.id,
-                            "lifetime": 3.0
+                            "lifetime": 4.0
                         }
                     });
                     
@@ -1081,9 +1112,46 @@ impl Game {
             }
         }
         
+        // Check for projectile-to-projectile collisions (rockets can hit each other!)
+        let mut rocket_collision_pairs: Vec<(usize, usize)> = Vec::new();
+        for i in 0..self.projectiles.len() {
+            if !self.projectiles[i].active || projectiles_to_explode.contains(&i) {
+                continue;
+            }
+            
+            for j in (i + 1)..self.projectiles.len() {
+                if !self.projectiles[j].active || projectiles_to_explode.contains(&j) {
+                    continue;
+                }
+                
+                let dx = self.projectiles[i].x - self.projectiles[j].x;
+                let dy = self.projectiles[i].y - self.projectiles[j].y;
+                let dist_squared = dx * dx + dy * dy;
+                
+                let collision_radius = 25.0; // Increased for easier rocket-to-rocket collisions!
+                if dist_squared < collision_radius * collision_radius {
+                    // Mark both rockets for explosion
+                    rocket_collision_pairs.push((i, j));
+                    if !projectiles_to_explode.contains(&i) {
+                        projectiles_to_explode.push(i);
+                    }
+                    if !projectiles_to_explode.contains(&j) {
+                        projectiles_to_explode.push(j);
+                    }
+                    println!("🚀💥 ROCKET COLLISION! Rockets {} and {} collided!", self.projectiles[i].id, self.projectiles[j].id);
+                    break;
+                }
+            }
+        }
+
         // Check for projectile collisions with the ball
         for (i, projectile) in self.projectiles.iter().enumerate() {
             if !projectile.active || projectiles_to_explode.contains(&i) {
+                continue;
+            }
+            
+            // Ball is immune to rockets while in respawn state (pickup cooldown or colored ball)
+            if self.ball.pickup_cooldown > 0.0 || self.ball.exclusive_team.is_some() {
                 continue;
             }
             
@@ -1097,11 +1165,23 @@ impl Game {
             }
         }
         
-        // Process explosions
+        // Process explosions with enhanced effects for rocket collisions
         for &index in projectiles_to_explode.iter() {
             if index < self.projectiles.len() {
                 let projectile = &self.projectiles[index];
-                                    self.create_explosion(projectile.x, projectile.y, projectile.owner_id, dual_mgr.clone());
+                
+                // Check if this projectile was involved in a rocket-to-rocket collision
+                let is_rocket_collision = rocket_collision_pairs.iter().any(|(i, j)| *i == index || *j == index);
+                
+                if is_rocket_collision {
+                    // Create a bigger explosion for rocket-to-rocket collisions!
+                    println!("💥💥 Creating ENHANCED rocket collision explosion at ({}, {})", projectile.x, projectile.y);
+                    self.create_enhanced_explosion(projectile.x, projectile.y, projectile.owner_id, dual_mgr.clone());
+                } else {
+                    // Regular explosion
+                    self.create_explosion(projectile.x, projectile.y, projectile.owner_id, dual_mgr.clone());
+                }
+                
                 self.projectiles[index].active = false;
             }
         }
@@ -1174,14 +1254,49 @@ impl Game {
                         "Unknown Player".to_string()
                     };
                     
-                    // Update scores based on which team was scored on (they lose a point in this context, but we track goals scored against them)
-                    // In corner defense, when your goal is hit, the other teams get points
-                    // For simplicity, we'll just increment a general score counter
-                    match scored_on_team {
-                        Team::Red => self.team1_score += 1,      // Point scored against red
-                        Team::Blue => self.team2_score += 1,     // Point scored against blue
-                        Team::Yellow => self.team3_score += 1,   // Point scored against yellow
-                        Team::Green => self.team4_score += 1,    // Point scored against green
+                    // Update scores based on which team was scored on
+                    // In corner defense, when your goal is hit, all OTHER teams get points
+                    if Self::is_soccer_map() {
+                        // Soccer map: only Red vs Blue
+                        match scored_on_team {
+                            Team::Red => {
+                                // Red goal was hit, so Blue team gets point
+                                self.team2_score += 1; // Blue gets point
+                            },
+                            Team::Blue => {
+                                // Blue goal was hit, so Red team gets point
+                                self.team1_score += 1; // Red gets point
+                            },
+                            _ => {} // Yellow and Green goals shouldn't exist on soccer map
+                        }
+                    } else {
+                        // Corner defense map: all four teams
+                        match scored_on_team {
+                            Team::Red => {
+                                // Red goal was hit, so Blue, Yellow, and Green teams get points
+                                self.team2_score += 1; // Blue gets point
+                                self.team3_score += 1; // Yellow gets point
+                                self.team4_score += 1; // Green gets point
+                            },
+                            Team::Blue => {
+                                // Blue goal was hit, so Red, Yellow, and Green teams get points
+                                self.team1_score += 1; // Red gets point
+                                self.team3_score += 1; // Yellow gets point
+                                self.team4_score += 1; // Green gets point
+                            },
+                            Team::Yellow => {
+                                // Yellow goal was hit, so Red, Blue, and Green teams get points
+                                self.team1_score += 1; // Red gets point
+                                self.team2_score += 1; // Blue gets point
+                                self.team4_score += 1; // Green gets point
+                            },
+                            Team::Green => {
+                                // Green goal was hit, so Red, Blue, and Yellow teams get points
+                                self.team1_score += 1; // Red gets point
+                                self.team2_score += 1; // Blue gets point
+                                self.team3_score += 1; // Yellow gets point
+                            },
+                        }
                     }
                     
                     // Reset ball position and state
@@ -1384,6 +1499,7 @@ impl Game {
         // Define explosion parameters
         let explosion_radius = 100.0;
         let explosion_force = 300.0;
+        let direct_hit_radius = 25.0; // Players within this radius get 3x knockback (direct hit)
         
         // Apply knockback to players in range
         let mut events_to_broadcast = Vec::new();
@@ -1399,8 +1515,17 @@ impl Game {
                 
                 // Calculate force based on distance (stronger closer to center)
                 let force_multiplier = 1.0 - (dist / explosion_radius);
-                let force_x = dir_x * explosion_force * force_multiplier;
-                let force_y = dir_y * explosion_force * force_multiplier;
+                
+                // DIRECT HIT BONUS: 3x knockback for close hits!
+                let direct_hit_bonus = if dist < direct_hit_radius { 
+                    println!("💥 DIRECT HIT! Player {} took 3x rocket damage at distance {:.1}", player_id, dist);
+                    3.0 
+                } else { 
+                    1.0 
+                };
+                
+                let force_x = dir_x * explosion_force * force_multiplier * direct_hit_bonus;
+                let force_y = dir_y * explosion_force * force_multiplier * direct_hit_bonus;
                 
                 // Apply impulse to player
                 player.velocity.0 += force_x;
@@ -1438,11 +1563,16 @@ impl Game {
         
         // Apply knockback to the ball if it's not grabbed
         if !self.ball.grabbed {
-            let dx = self.ball.x - x;
-            let dy = self.ball.y - y;
-            let dist = (dx * dx + dy * dy).sqrt();
-            
-            if dist < explosion_radius {
+            // Ball is immune to explosion knockback while in respawn state (pickup cooldown or colored ball)
+            if self.ball.pickup_cooldown > 0.0 || self.ball.exclusive_team.is_some() {
+                // Skip explosion knockback for respawn ball
+                println!("Ball immune to explosion knockback (respawn state)");
+            } else {
+                let dx = self.ball.x - x;
+                let dy = self.ball.y - y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                
+                if dist < explosion_radius {
                 // Calculate normalized direction away from explosion
                 let dir_x = if dist > 0.0 { dx / dist } else { 1.0 };
                 let dir_y = if dist > 0.0 { dy / dist } else { 0.0 };
@@ -1466,6 +1596,7 @@ impl Game {
                     println!("Capped ball velocity after explosion: speed was {:.2}, now {:.2}", current_speed, max_ball_speed);
                 }
             }
+            }
         }
         
         // Send explosion event to all clients
@@ -1475,6 +1606,126 @@ impl Game {
             "y": y,
             "radius": explosion_radius,
             "player_id": owner_id
+        });
+        
+        self.broadcast_event(dual_mgr.clone(), MessageType::Explosion, explosion_event);
+    }
+
+    // Add a method to create an ENHANCED explosion effect for rocket-to-rocket collisions
+    fn create_enhanced_explosion(&mut self, x: f32, y: f32, owner_id: u32, dual_mgr: Option<Arc<crate::dual_connection::DualConnectionManager>>) {
+        // Enhanced explosion parameters - BIGGER AND STRONGER!
+        let explosion_radius = 150.0; // 50% larger radius
+        let explosion_force = 450.0; // 50% more force
+        let direct_hit_radius = 35.0; // Larger direct hit radius
+        
+        println!("💥💥💥 ENHANCED ROCKET COLLISION EXPLOSION! Radius: {}, Force: {}", explosion_radius, explosion_force);
+        
+        // Apply knockback to players in range
+        let mut events_to_broadcast = Vec::new();
+        for (player_id, player) in self.players.iter_mut() {
+            let dx = player.ship.x - x;
+            let dy = player.ship.y - y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            
+            if dist < explosion_radius {
+                // Calculate normalized direction away from explosion
+                let dir_x = if dist > 0.0 { dx / dist } else { 1.0 };
+                let dir_y = if dist > 0.0 { dy / dist } else { 0.0 };
+                
+                // Calculate force based on distance (stronger closer to center)
+                let force_multiplier = 1.0 - (dist / explosion_radius);
+                
+                // DIRECT HIT BONUS: 3x knockback for close hits!
+                let direct_hit_bonus = if dist < direct_hit_radius { 
+                    println!("💥💥 ENHANCED DIRECT HIT! Player {} took 3x enhanced rocket damage at distance {:.1}", player_id, dist);
+                    3.0 
+                } else { 
+                    1.0 
+                };
+                
+                let force_x = dir_x * explosion_force * force_multiplier * direct_hit_bonus;
+                let force_y = dir_y * explosion_force * force_multiplier * direct_hit_bonus;
+                
+                // Apply impulse to player
+                player.velocity.0 += force_x;
+                player.velocity.1 += force_y;
+                
+                // If this player has the ball, they lose it
+                if self.ball.grabbed && self.ball.owner == Some(*player_id) {
+                    self.ball.grabbed = false;
+                    self.ball.owner = None;
+                    self.ball.x = player.ship.x;
+                    self.ball.y = player.ship.y;
+                    
+                    // Apply impulse to the ball in the same direction (enhanced)
+                    self.ball.vx = force_x * 1.5;
+                    self.ball.vy = force_y * 1.5;
+                    
+                    // Apply grab cooldown
+                    player.grab_cooldown = 0.5;
+                    
+                    // Collect event to broadcast after mutable borrow ends  
+                    let knock_event = json!({
+                        "type": "ball_knocked",
+                        "player_id": *player_id
+                    });
+                    
+                    events_to_broadcast.push((MessageType::BallKnocked, knock_event));
+                }
+            }
+        }
+        
+        // Broadcast collected events after mutable borrow ends
+        for (msg_type, event_data) in events_to_broadcast {
+            self.broadcast_event(dual_mgr.clone(), msg_type, event_data);
+        }
+        
+        // Apply enhanced knockback to the ball if it's not grabbed
+        if !self.ball.grabbed {
+            // Ball is immune to explosion knockback while in respawn state (pickup cooldown or colored ball)
+            if self.ball.pickup_cooldown > 0.0 || self.ball.exclusive_team.is_some() {
+                // Skip explosion knockback for respawn ball
+                println!("Ball immune to enhanced explosion knockback (respawn state)");
+            } else {
+                let dx = self.ball.x - x;
+                let dy = self.ball.y - y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                
+                if dist < explosion_radius {
+                // Calculate normalized direction away from explosion
+                let dir_x = if dist > 0.0 { dx / dist } else { 1.0 };
+                let dir_y = if dist > 0.0 { dy / dist } else { 0.0 };
+                
+                // Calculate force based on distance (stronger closer to center)
+                let force_multiplier = 1.0 - (dist / explosion_radius);
+                let force_x = dir_x * explosion_force * force_multiplier * 2.5; // Even stronger effect on ball
+                let force_y = dir_y * explosion_force * force_multiplier * 2.5;
+                
+                // Apply impulse to ball
+                self.ball.vx += force_x;
+                self.ball.vy += force_y;
+                
+                // Cap the ball's maximum velocity to prevent tunneling
+                let max_ball_speed = 500.0;
+                let current_speed = (self.ball.vx * self.ball.vx + self.ball.vy * self.ball.vy).sqrt();
+                if current_speed > max_ball_speed {
+                    let scale_factor = max_ball_speed / current_speed;
+                    self.ball.vx *= scale_factor;
+                    self.ball.vy *= scale_factor;
+                    println!("Capped ball velocity after enhanced explosion: speed was {:.2}, now {:.2}", current_speed, max_ball_speed);
+                }
+            }
+            }
+        }
+        
+        // Send enhanced explosion event to all clients (as regular explosion with enhanced flag)
+        let explosion_event = json!({
+            "type": "explosion",
+            "x": x,
+            "y": y,
+            "radius": explosion_radius,
+            "player_id": owner_id,
+            "enhanced": true
         });
         
         self.broadcast_event(dual_mgr.clone(), MessageType::Explosion, explosion_event);

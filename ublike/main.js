@@ -924,8 +924,10 @@ class MainScene extends Phaser.Scene {
               
               // Handle explosion message
               if (msg.type === 'explosion') {
-                // Play explosion effect
-                this.playExplosionEffect(msg.x, msg.y, msg.radius, msg.player_id);
+                // Play explosion effect (check for enhanced rocket collision explosions)
+                const isEnhanced = msg.enhanced === true;
+                console.log(`💥 Received explosion event - Enhanced: ${isEnhanced}, Radius: ${msg.radius}`);
+                this.playExplosionEffect(msg.x, msg.y, msg.radius, msg.player_id, isEnhanced);
                 return;
               }
               
@@ -3163,13 +3165,15 @@ class MainScene extends Phaser.Scene {
   }
   
   // Add method to handle explosions
-  playExplosionEffect(x, y, radius, playerId) {
+  playExplosionEffect(x, y, radius, playerId, enhanced = false) {
     // Play explosion sound - using the working approach
     try {
-      console.log('🎵 Playing explosion sound at:', x.toFixed(1), y.toFixed(1), 'radius:', radius, 'player:', playerId);
+      const explosionType = enhanced ? '💥💥 ENHANCED ROCKET COLLISION' : '💥 Regular';
+      console.log(`🎵 Playing explosion sound (${explosionType}) at:`, x.toFixed(1), y.toFixed(1), 'radius:', radius, 'player:', playerId);
+      
       if (window.testExplosionSound) {
         window.testExplosionSound();
-        console.log('✅ Called working testExplosionSound for real explosion');
+        console.log('✅ Called working testExplosionSound for explosion');
       } else {
         console.error('❌ testExplosionSound not available, trying method');
         this.playExplosionSound();
@@ -3178,45 +3182,126 @@ class MainScene extends Phaser.Scene {
       console.error('❌ Explosion sound error:', soundError);
     }
     
-    // Create explosion flash
-    const flash = this.add.circle(x, y, radius, 0xff6600, 0.6);
-    flash.setDepth(10);
-    
-    // Fade out and destroy
-    this.tweens.add({
-      targets: flash,
-      alpha: 0,
-      scale: 1.5,
-      duration: 500,
-      onComplete: () => {
-        flash.destroy();
-      }
-    });
-    
-    // Add explosion particles
-    if (this.particleEmitter) {
-      // Configure emitter for explosion
-      const originalTint = this.particleEmitter.tint;
-      this.particleEmitter.setTint(0xff6600);
+    if (enhanced) {
+      // Enhanced explosion for rocket collisions - BIGGER AND MORE DRAMATIC!
+      console.log('🚀💥💥 Creating ENHANCED rocket collision explosion visual!');
       
-      // Emit particles in all directions
-      for (let i = 0; i < 50; i++) {
-        const angle = Math.random() * Math.PI * 2;
-        const distance = Math.random() * radius * 0.8;
-        const x2 = x + Math.cos(angle) * distance;
-        const y2 = y + Math.sin(angle) * distance;
+      // Multiple explosion rings for enhanced effect
+      const colors = [0xff6600, 0xff0000, 0xffff00, 0xffffff];
+      const scales = [1.0, 1.3, 1.6, 2.0];
+      
+      colors.forEach((color, i) => {
+        setTimeout(() => {
+          const flash = this.add.circle(x, y, radius * 0.8, color, 0.7 - i * 0.15);
+          flash.setDepth(10 + i);
+          
+          this.tweens.add({
+            targets: flash,
+            alpha: 0,
+            scale: scales[i],
+            duration: 700 + i * 100,
+            ease: 'Power2.easeOut',
+            onComplete: () => {
+              flash.destroy();
+            }
+          });
+        }, i * 50);
+      });
+      
+      // Enhanced particle explosion
+      if (this.particleEmitter) {
+        const originalTint = this.particleEmitter.tint;
         
-        this.particleEmitter.emitParticleAt(x2, y2);
+        // Multiple particle bursts with different colors
+        [0xff6600, 0xff0000, 0xffff00].forEach((tint, i) => {
+          setTimeout(() => {
+            this.particleEmitter.setTint(tint);
+            
+            // More particles for enhanced explosion
+            for (let j = 0; j < 80; j++) {
+              const angle = Math.random() * Math.PI * 2;
+              const distance = Math.random() * radius * 1.2; // Larger spread
+              const x2 = x + Math.cos(angle) * distance;
+              const y2 = y + Math.sin(angle) * distance;
+              
+              this.particleEmitter.emitParticleAt(x2, y2);
+            }
+          }, i * 75);
+        });
+        
+        // Reset emitter tint
+        setTimeout(() => {
+          this.particleEmitter.setTint(originalTint);
+        }, 300);
       }
       
-      // Reset emitter tint
-      setTimeout(() => {
-        this.particleEmitter.setTint(originalTint);
-      }, 100);
+      // Enhanced screen shake
+      this.cameras.main.shake(400, 0.02);
+      
+      // Enhanced explosion text effect
+      const explosionText = this.add.text(x, y - 50, '💥💥 ROCKET COLLISION! 💥💥', {
+        fontFamily: 'Arial',
+        fontSize: 20,
+        color: '#ffff00',
+        stroke: '#ff0000',
+        strokeThickness: 3,
+        align: 'center'
+      }).setOrigin(0.5).setDepth(1000);
+      
+      // Animate the text
+      this.tweens.add({
+        targets: explosionText,
+        y: explosionText.y - 40,
+        alpha: 0,
+        scale: 1.5,
+        duration: 1500,
+        ease: 'Power2.easeOut',
+        onComplete: () => {
+          explosionText.destroy();
+        }
+      });
+      
+    } else {
+      // Regular explosion
+      const flash = this.add.circle(x, y, radius, 0xff6600, 0.6);
+      flash.setDepth(10);
+      
+      // Fade out and destroy
+      this.tweens.add({
+        targets: flash,
+        alpha: 0,
+        scale: 1.5,
+        duration: 500,
+        onComplete: () => {
+          flash.destroy();
+        }
+      });
+      
+      // Add explosion particles
+      if (this.particleEmitter) {
+        // Configure emitter for explosion
+        const originalTint = this.particleEmitter.tint;
+        this.particleEmitter.setTint(0xff6600);
+        
+        // Emit particles in all directions
+        for (let i = 0; i < 50; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const distance = Math.random() * radius * 0.8;
+          const x2 = x + Math.cos(angle) * distance;
+          const y2 = y + Math.sin(angle) * distance;
+          
+          this.particleEmitter.emitParticleAt(x2, y2);
+        }
+        
+        // Reset emitter tint
+        setTimeout(() => {
+          this.particleEmitter.setTint(originalTint);
+        }, 100);
+      }
+      
+      // Screen shake effect
+      this.cameras.main.shake(200, 0.01);
     }
-    
-    // Screen shake effect
-    this.cameras.main.shake(200, 0.01);
   }
   
   // Update the score display
