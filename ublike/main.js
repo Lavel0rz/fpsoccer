@@ -294,6 +294,46 @@ class MainScene extends Phaser.Scene {
     });
   }
   
+  // Helper function to detect soccer map (no Yellow/Green goals)
+  detectSoccerMap(mapData) {
+    if (!mapData) return false;
+    
+    // Check if there are any Yellow or Green goals
+    const hasYellowGoals = mapData.some(obj => obj.type === 'goal_yellow');
+    const hasGreenGoals = mapData.some(obj => obj.type === 'goal_green');
+    
+    // Soccer map = no Yellow or Green goals
+    const isSoccer = !hasYellowGoals && !hasGreenGoals;
+    console.log(`Map detection: Yellow goals: ${hasYellowGoals}, Green goals: ${hasGreenGoals}, Is soccer: ${isSoccer}`);
+    
+    return isSoccer;
+  }
+
+  // Helper function to hide Yellow and Green team buttons on soccer map
+  hideYellowGreenTeamButtons() {
+    console.log('Hiding Yellow and Green team buttons for soccer map');
+    
+    // Hide buttons in game.html
+    const yellowButton = document.getElementById('join-yellow-team');
+    const greenButton = document.getElementById('join-green-team');
+    
+    if (yellowButton) {
+      yellowButton.style.display = 'none';
+      console.log('Hidden Yellow team button');
+    }
+    
+    if (greenButton) {
+      greenButton.style.display = 'none';
+      console.log('Hidden Green team button');
+    }
+    
+    // Hide buttons in index.html if they exist
+    const teamButtons = document.querySelectorAll('.team-yellow, .team-green');
+    teamButtons.forEach(button => {
+      button.style.display = 'none';
+    });
+  }
+
   // Ship animations removed - using single ship.png sprite
   
   create() {
@@ -320,7 +360,15 @@ class MainScene extends Phaser.Scene {
     // Determine the current map name (for cornerdefense auto-shooting)
     this.currentMapName = 'soccer'; // Now using corner.json 
     this.isCornerDefenseMap = this.currentMapName === 'cornerdefense';
-    console.log(`Current map: ${this.currentMapName}, Server-side auto-shooting enabled: ${this.isCornerDefenseMap}`);
+    
+    // Detect if this is soccer map (no Yellow/Green goals)
+    this.isSoccerMap = this.detectSoccerMap(mapData);
+    console.log(`Current map: ${this.currentMapName}, Soccer map: ${this.isSoccerMap}, Server-side auto-shooting enabled: ${this.isCornerDefenseMap}`);
+    
+    // Hide Yellow and Green team buttons if on soccer map
+    if (this.isSoccerMap) {
+      this.hideYellowGreenTeamButtons();
+    }
     
     // Auto-shooting state (client-side disabled for cornerdefense - server handles it)
     this.autoShootCooldown = 0;
@@ -407,17 +455,22 @@ class MainScene extends Phaser.Scene {
     // Create boost circle graphics
     this.boostCircle = this.add.graphics();
     
-    // Create UI elements
-    this.pingText = this.add.text(10, 10, "Ping: -- ms", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    // Create UI elements - hide debug info for mobile
+    if (!this.isMobile) {
+      this.pingText = this.add.text(10, 10, "Ping: -- ms", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+      this.teamText = this.add.text(10, 70, "Team: --", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    } else {
+      // For mobile, create hidden elements to avoid null reference errors
+      this.pingText = this.add.text(10, 10, "", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0).setVisible(false);
+      this.teamText = this.add.text(10, 70, "", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0).setVisible(false);
+    }
     
-    // Create score display with multiple text objects for different colors
+    // Create score display with multiple text objects for different colors - hide for mobile since we use pie chart
     const scoreY = 40;
-    this.scoreLabel = this.add.text(10, scoreY, "Score: ", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
-    this.redScoreText = this.add.text(this.scoreLabel.x + this.scoreLabel.width, scoreY, "0", { font: "16px Arial", fill: "#ff0000" }).setScrollFactor(0);
-    this.scoreSeparator = this.add.text(this.redScoreText.x + this.redScoreText.width, scoreY, " - ", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
-    this.blueScoreText = this.add.text(this.scoreSeparator.x + this.scoreSeparator.width, scoreY, "0", { font: "16px Arial", fill: "#0000ff" }).setScrollFactor(0);
-    
-    this.teamText = this.add.text(10, 70, "Team: --", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0);
+    this.scoreLabel = this.add.text(10, scoreY, "Score: ", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0).setVisible(!this.isMobile);
+    this.redScoreText = this.add.text(this.scoreLabel.x + this.scoreLabel.width, scoreY, "0", { font: "16px Arial", fill: "#ff0000" }).setScrollFactor(0).setVisible(!this.isMobile);
+    this.scoreSeparator = this.add.text(this.redScoreText.x + this.redScoreText.width, scoreY, " - ", { font: "16px Arial", fill: "#ffffff" }).setScrollFactor(0).setVisible(!this.isMobile);
+    this.blueScoreText = this.add.text(this.scoreSeparator.x + this.scoreSeparator.width, scoreY, "0", { font: "16px Arial", fill: "#0000ff" }).setScrollFactor(0).setVisible(!this.isMobile);
     
     // Initialize team scores for 4-team support
     this.team1Score = 0;
@@ -1572,30 +1625,9 @@ class MainScene extends Phaser.Scene {
     this.leftJoystickForceY = 0;
     this.leftJoystickMaxDistance = baseRadius;
     
-    // === RIGHT JOYSTICK (AIMING + SHOOTING) ===
-    this.rightJoystickContainer = this.add.container(0, 0);
-    this.rightJoystickContainer.setScrollFactor(0);
-    this.rightJoystickContainer.setDepth(1000);
+    // Touch-to-aim system - no right joystick needed
     
-    this.rightJoystickBase = this.add.circle(0, 0, baseRadius, 0x444400, 0.6);
-    this.rightJoystickThumb = this.add.circle(0, 0, thumbRadius, 0x888800, 0.8);
-    
-    // Add shoot button in center of right joystick
-    this.rightJoystickShootButton = this.add.circle(0, 0, 15, 0xff0000, 0.9);
-    
-    this.rightJoystickContainer.add([this.rightJoystickBase, this.rightJoystickThumb, this.rightJoystickShootButton]);
-    this.rightJoystickContainer.setVisible(false);
-    
-    // Right joystick state
-    this.rightJoystickActive = false;
-    this.rightJoystickTouchId = null;
-    this.rightJoystickStartX = 0;
-    this.rightJoystickStartY = 0;
-    this.rightJoystickForceX = 0;
-    this.rightJoystickForceY = 0;
-    this.rightJoystickMaxDistance = baseRadius;
-    
-    // Add labels for joysticks
+    // Add label for movement joystick
     this.leftJoystickLabel = this.add.text(0, 0, 'MOVE', {
       fontSize: '12px',
       color: '#ffffff',
@@ -1603,12 +1635,14 @@ class MainScene extends Phaser.Scene {
       strokeThickness: 2
     }).setOrigin(0.5).setScrollFactor(0).setDepth(1001).setVisible(false);
     
-    this.rightJoystickLabel = this.add.text(0, 0, 'AIM', {
-      fontSize: '12px', 
+    // Add touch instruction text
+    this.touchInstructionText = this.add.text(width * 0.75, height - 80, 'Touch anywhere\nto aim & shoot', {
+      fontSize: '12px',
       color: '#ffffff',
       stroke: '#000000',
-      strokeThickness: 2
-    }).setOrigin(0.5).setScrollFactor(0).setDepth(1001).setVisible(false);
+      strokeThickness: 1,
+      align: 'center'
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
     
     // Enable multi-touch
     this.input.addPointer(3); // Support up to 4 touches
@@ -1616,7 +1650,6 @@ class MainScene extends Phaser.Scene {
     // === POINTER DOWN HANDLER ===
     this.input.on('pointerdown', (pointer) => {
       const leftSide = pointer.x < width / 2;
-      const rightSide = pointer.x >= width / 2;
       
       // LEFT SIDE - Movement joystick
       if (leftSide && !this.leftJoystickActive) {
@@ -1638,30 +1671,11 @@ class MainScene extends Phaser.Scene {
         return;
       }
       
-      // RIGHT SIDE - Aiming joystick
-      if (rightSide && !this.rightJoystickActive) {
-        console.log('🎯 Right joystick activated at', pointer.x, pointer.y, 'touchID:', pointer.id);
-        
-        this.rightJoystickStartX = pointer.x;
-        this.rightJoystickStartY = pointer.y;
-        this.rightJoystickContainer.setPosition(this.rightJoystickStartX, this.rightJoystickStartY);
-        this.rightJoystickThumb.setPosition(0, 0);
-        this.rightJoystickContainer.setVisible(true);
-        
-        // Position label
-        this.rightJoystickLabel.setPosition(this.rightJoystickStartX, this.rightJoystickStartY - 70);
-        this.rightJoystickLabel.setVisible(true);
-        
-        this.rightJoystickTouchId = pointer.id;
-        this.rightJoystickActive = true;
-        console.log('✅ Right joystick ready');
-        
-        // Check if touch is in center (shoot button)
-        this.checkRightJoystickShoot(pointer);
-        return;
-      }
+      // ANYWHERE ELSE - Touch to aim and shoot (cannon barely moves with ship)
+      console.log('🎯 Touch to aim and shoot at', pointer.x, pointer.y);
+      this.handleTouchAimAndShoot(pointer);
       
-      console.log('⚠️ Touch ignored - Left side:', leftSide, 'Right side:', rightSide, 'LeftActive:', this.leftJoystickActive, 'RightActive:', this.rightJoystickActive);
+      // Touch handled by touch-to-aim system
     });
     
     // === POINTER MOVE HANDLER ===
@@ -1671,9 +1685,9 @@ class MainScene extends Phaser.Scene {
         this.updateLeftJoystick(pointer);
       }
       
-      // Update right joystick
-      if (this.rightJoystickActive && pointer.id === this.rightJoystickTouchId) {
-        this.updateRightJoystick(pointer);
+      // For non-joystick touches, update aim as they drag
+      if (!this.leftJoystickActive || pointer.id !== this.leftJoystickTouchId) {
+        this.updateTouchAim(pointer);
       }
     });
     
@@ -1696,17 +1710,6 @@ class MainScene extends Phaser.Scene {
         this.inputState.down = false;
         this.sendInput();
       }
-      
-      // Release right joystick
-      if (this.rightJoystickActive && pointer.id === this.rightJoystickTouchId) {
-        console.log('Right joystick released');
-        this.rightJoystickContainer.setVisible(false);
-        this.rightJoystickLabel.setVisible(false);
-        this.rightJoystickActive = false;
-        this.rightJoystickTouchId = null;
-        this.rightJoystickForceX = 0;
-        this.rightJoystickForceY = 0;
-      }
     });
     
     // === POINTER CANCEL HANDLER ===
@@ -1725,15 +1728,6 @@ class MainScene extends Phaser.Scene {
         this.inputState.up = false;
         this.inputState.down = false;
         this.sendInput();
-      }
-      
-      if (this.rightJoystickActive && pointer.id === this.rightJoystickTouchId) {
-        this.rightJoystickContainer.setVisible(false);
-        this.rightJoystickLabel.setVisible(false);
-        this.rightJoystickActive = false;
-        this.rightJoystickTouchId = null;
-        this.rightJoystickForceX = 0;
-        this.rightJoystickForceY = 0;
       }
     });
   }
@@ -1785,84 +1779,55 @@ class MainScene extends Phaser.Scene {
       );
     }
     
-    // PURE MOVEMENT - no cannon control whatsoever
+    // PURE MOVEMENT - ship moves but cannon stays independent
+    // Do NOT update cannon position here - it's controlled by touch aim only
     this.sendInput();
   }
   
-  // Helper method to update right joystick (aiming)
-  updateRightJoystick(pointer) {
-    const dx = pointer.x - this.rightJoystickStartX;
-    const dy = pointer.y - this.rightJoystickStartY;
-    const distance = Math.sqrt(dx * dx + dy * dy);
+  // Helper method to handle touch-to-aim and shoot
+  handleTouchAimAndShoot(pointer) {
+    console.log('🎯 Touch to aim and shoot at', pointer.x, pointer.y);
     
-    this.rightJoystickForceX = dx / this.rightJoystickMaxDistance;
-    this.rightJoystickForceY = dy / this.rightJoystickMaxDistance;
+    // Convert touch position to world coordinates
+    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
     
-    // Limit thumb position
-    let thumbX = dx;
-    let thumbY = dy;
-    
-    if (distance > this.rightJoystickMaxDistance) {
-      const angle = Math.atan2(dy, dx);
-      thumbX = Math.cos(angle) * this.rightJoystickMaxDistance;
-      thumbY = Math.sin(angle) * this.rightJoystickMaxDistance;
+    // Update aim target - this only affects the cannon, NOT the ship movement
+    if (!this.aimTarget) {
+      this.aimTarget = { x: 0, y: 0 };
     }
+    this.aimTarget.x = worldPoint.x;
+    this.aimTarget.y = worldPoint.y;
     
-    this.rightJoystickThumb.setPosition(thumbX, thumbY);
+    // Update cannon position to aim at touch point
+    this.updateCannonPosition();
     
-    // Update aiming based on joystick direction - ONLY affects cannon, not ship
-    if (distance > 10) { // Only aim if joystick moved significantly
-      // Convert screen joystick direction to world coordinates
-      const worldDx = this.rightJoystickForceX * 200; // Scale factor for aiming distance
-      const worldDy = this.rightJoystickForceY * 200;
-      
-      // Set aim target relative to ship position - THIS IS THE ONLY THING WE DO
-      if (!this.aimTarget) {
-        this.aimTarget = { x: 0, y: 0 };
-      }
-      this.aimTarget.x = this.ship.x + worldDx;
-      this.aimTarget.y = this.ship.y + worldDy;
-      
-      // Let the cannon system handle the rest - DON'T touch ship rotation or movement direction
-      this.updateCannonPosition();
-    }
+    // Shoot immediately
+    this.inputState.shoot = true;
+    this.sendInput();
     
-    // Check for shooting (center press)
-    this.checkRightJoystickShoot(pointer);
+    // Reset shoot flag after delay
+    setTimeout(() => {
+      this.inputState.shoot = false;
+      this.sendInput();
+    }, 100);
+    
+    console.log('✅ Aimed at world position:', worldPoint.x.toFixed(1), worldPoint.y.toFixed(1));
   }
   
-  // Helper method to check if right joystick center is pressed (shooting)
-  checkRightJoystickShoot(pointer) {
-    const dx = pointer.x - this.rightJoystickStartX;
-    const dy = pointer.y - this.rightJoystickStartY;
-    const distance = Math.sqrt(dx * dx + dy * dy);
+  // Helper method to update aim target during touch drag
+  updateTouchAim(pointer) {
+    // Convert touch position to world coordinates
+    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
     
-    // If touch is in center area, shoot
-    if (distance < 20) { // Center deadzone for shooting
-      console.log('🎯 Right joystick center pressed - shooting!');
-      
-      // Skip shooting for cornerdefense map if auto-shooting is active
-      if (this.isCornerDefenseMap) {
-        console.log('Manual shooting disabled for cornerdefense map (auto-shooting active)');
-        return;
-      }
-      
-      // Set shoot flag
-      this.inputState.shoot = true;
-      this.sendInput();
-      
-      // Reset shoot flag after delay
-      setTimeout(() => {
-        this.inputState.shoot = false;
-        this.sendInput();
-      }, 100);
-      
-      // Visual feedback
-      this.rightJoystickShootButton.setTint(0x00ff00); // Green flash
-      setTimeout(() => {
-        this.rightJoystickShootButton.clearTint();
-      }, 200);
+    // Update aim target - this only affects the cannon, NOT the ship movement
+    if (!this.aimTarget) {
+      this.aimTarget = { x: 0, y: 0 };
     }
+    this.aimTarget.x = worldPoint.x;
+    this.aimTarget.y = worldPoint.y;
+    
+    // Update cannon position to aim at touch point
+    this.updateCannonPosition();
   }
   
   // Helper method to update input state based on joystick position
@@ -2305,57 +2270,72 @@ class MainScene extends Phaser.Scene {
         
         // Find the closest wall and position ball exactly at its edge
         if (this.mapObjects) {
-          let closestWall = null;
+          let closestObject = null;
           let minDistance = Infinity;
           
-          this.mapObjects.forEach(wall => {
-            if (wall.type !== 'wall') return;
+          this.mapObjects.forEach(obj => {
+            if (obj.type !== 'wall' && !obj.type.startsWith('goal')) return;
             
-            // Calculate distance to this wall
-            const wallLeft = wall.x;
-            const wallRight = wall.x + wall.width;
-            const wallTop = wall.y;
-            const wallBottom = wall.y + wall.height;
+            // Calculate distance to this object
+            const objLeft = obj.x;
+            const objRight = obj.x + obj.width;
+            const objTop = obj.y;
+            const objBottom = obj.y + obj.height;
             
-            // Find closest point on wall to ball
-            const closestX = Math.max(wallLeft, Math.min(curr.x, wallRight));
-            const closestY = Math.max(wallTop, Math.min(curr.y, wallBottom));
+            // Find closest point on object to ball
+            const closestX = Math.max(objLeft, Math.min(curr.x, objRight));
+            const closestY = Math.max(objTop, Math.min(curr.y, objBottom));
             
             const distance = Math.sqrt((curr.x - closestX) ** 2 + (curr.y - closestY) ** 2);
             
             if (distance < minDistance) {
               minDistance = distance;
-              closestWall = { wall, closestX, closestY };
+              closestObject = { obj, closestX, closestY };
             }
           });
           
-          // If we found a close wall, blend toward wall edge instead of snapping
-          if (closestWall && minDistance < 25) { // Slightly smaller radius for subtlety
-            const wall = closestWall.wall;
-            const wallLeft = wall.x;
-            const wallRight = wall.x + wall.width;
-            const wallTop = wall.y;
-            const wallBottom = wall.y + wall.height;
+          // If we found a close object, blend toward edge instead of snapping
+          if (closestObject && minDistance < 25) { // Slightly smaller radius for subtlety
+            const obj = closestObject.obj;
+            const objLeft = obj.x;
+            const objRight = obj.x + obj.width;
+            const objTop = obj.y;
+            const objBottom = obj.y + obj.height;
             
             // Calculate ideal position
             let idealX = curr.x;
             let idealY = curr.y;
             
-            // Determine which side of the wall we're on and position accordingly
-            if (Math.abs(curr.x - wallLeft) < Math.abs(curr.x - wallRight)) {
-              idealX = wallLeft + ballRadius; // Closer to left side
+            if (obj.type.startsWith('goal')) {
+              // Goals: Position ball slightly inside for smooth entry
+              if (Math.abs(curr.x - objLeft) < Math.abs(curr.x - objRight)) {
+                idealX = objLeft + ballRadius * 0.7; // Slightly inside left edge
+              } else {
+                idealX = objRight - ballRadius * 0.7; // Slightly inside right edge  
+              }
+              
+              if (Math.abs(curr.y - objTop) < Math.abs(curr.y - objBottom)) {
+                idealY = objTop + ballRadius * 0.7; // Slightly inside top edge
+              } else {
+                idealY = objBottom - ballRadius * 0.7; // Slightly inside bottom edge
+              }
             } else {
-              idealX = wallRight - ballRadius; // Closer to right side  
-            }
-            
-            if (Math.abs(curr.y - wallTop) < Math.abs(curr.y - wallBottom)) {
-              idealY = wallTop + ballRadius; // Closer to top side
-            } else {
-              idealY = wallBottom - ballRadius; // Closer to bottom side
+              // Walls: Position ball outside (bouncing off)
+              if (Math.abs(curr.x - objLeft) < Math.abs(curr.x - objRight)) {
+                idealX = objLeft + ballRadius; // Closer to left side
+              } else {
+                idealX = objRight - ballRadius; // Closer to right side  
+              }
+              
+              if (Math.abs(curr.y - objTop) < Math.abs(curr.y - objBottom)) {
+                idealY = objTop + ballRadius; // Closer to top side
+              } else {
+                idealY = objBottom - ballRadius; // Closer to bottom side
+              }
             }
             
             // Blend toward ideal position instead of snapping
-            const blendFactor = 0.6; // Gentler blend
+            const blendFactor = obj.type.startsWith('goal') ? 0.5 : 0.6; // Gentler for goals
             adjustedX = Phaser.Math.Linear(curr.x, idealX, blendFactor);
             adjustedY = Phaser.Math.Linear(curr.y, idealY, blendFactor);
           }
@@ -2377,13 +2357,14 @@ class MainScene extends Phaser.Scene {
         
         if (prediction.willCollide) {
           // Very subtle approach to collision point - barely noticeable
-          const collisionSmoothingFactor = 0.15; // Much gentler than 0.3
+          const collisionSmoothingFactor = prediction.isGoal ? 0.12 : 0.15; // Slightly gentler for goals
           this.ball.x = Phaser.Math.Linear(this.ball.x, prediction.collisionPoint.x, collisionSmoothingFactor);
           this.ball.y = Phaser.Math.Linear(this.ball.y, prediction.collisionPoint.y, collisionSmoothingFactor);
           
           // Only log occasionally to reduce console spam
           if (Math.random() < 0.1) {
-            console.log(`Subtle prediction: (${prediction.collisionPoint.x.toFixed(1)}, ${prediction.collisionPoint.y.toFixed(1)})`);
+            const objectType = prediction.isGoal ? 'goal' : 'wall';
+            console.log(`Subtle ${objectType} prediction: (${prediction.collisionPoint.x.toFixed(1)}, ${prediction.collisionPoint.y.toFixed(1)})`);
           }
         } else {
           // Slightly faster normal interpolation for smoother overall movement
@@ -2435,12 +2416,12 @@ class MainScene extends Phaser.Scene {
       simVx *= 0.998;
       simVy *= 0.998;
       
-      // Check for wall collision on this simulated frame
-      for (const wall of this.mapObjects) {
-        if (wall.type !== 'wall') continue;
+      // Check for wall AND goal collision on this simulated frame
+      for (const obj of this.mapObjects) {
+        if (obj.type !== 'wall' && !obj.type.startsWith('goal')) continue;
         
         // Ray-cast from current position to next position
-        const collision = this.raycastToWall(simX, simY, nextX, nextY, ballRadius, wall);
+        const collision = this.raycastToObject(simX, simY, nextX, nextY, ballRadius, obj);
         
         if (collision.hit) {
           // Only return prediction if collision is close enough to matter
@@ -2449,7 +2430,8 @@ class MainScene extends Phaser.Scene {
               willCollide: true,
               collisionPoint: collision.point,
               framesUntilCollision: frame,
-              wallHit: wall
+              objectHit: obj,
+              isGoal: obj.type.startsWith('goal')
             };
           }
         }
@@ -2467,19 +2449,21 @@ class MainScene extends Phaser.Scene {
     return { willCollide: false };
   }
 
-  // Ray-casting collision detection
-  raycastToWall(startX, startY, endX, endY, ballRadius, wall) {
-    // Expand wall by ball radius with slight buffer for smoother prediction
-    const buffer = 2; // Small buffer for gentler prediction
-    const wallLeft = wall.x - ballRadius - buffer;
-    const wallRight = wall.x + wall.width + ballRadius + buffer;
-    const wallTop = wall.y - ballRadius - buffer;
-    const wallBottom = wall.y + wall.height + ballRadius + buffer;
+  // Ray-casting collision detection for walls and goals
+  raycastToObject(startX, startY, endX, endY, ballRadius, obj) {
+    // Different buffer for goals vs walls
+    const buffer = obj.type.startsWith('goal') ? 1 : 2; // Smaller buffer for goals
     
-    // Check if ray intersects with expanded wall bounds
+    // Expand object by ball radius with slight buffer for smoother prediction
+    const objLeft = obj.x - ballRadius - buffer;
+    const objRight = obj.x + obj.width + ballRadius + buffer;
+    const objTop = obj.y - ballRadius - buffer;
+    const objBottom = obj.y + obj.height + ballRadius + buffer;
+    
+    // Check if ray intersects with expanded object bounds
     const intersection = this.lineRectIntersection(
       startX, startY, endX, endY,
-      wallLeft, wallTop, wallRight - wallLeft, wallBottom - wallTop
+      objLeft, objTop, objRight - objLeft, objBottom - objTop
     );
     
     if (intersection.intersects) {
@@ -2487,23 +2471,40 @@ class MainScene extends Phaser.Scene {
       let collisionX = intersection.x;
       let collisionY = intersection.y;
       
-      // Adjust collision point to account for ball radius (without buffer for final position)
-      if (Math.abs(collisionX - wall.x) < ballRadius) {
-        collisionX = wall.x + ballRadius; // Hit left side
-      } else if (Math.abs(collisionX - (wall.x + wall.width)) < ballRadius) {
-        collisionX = wall.x + wall.width - ballRadius; // Hit right side
-      }
-      
-      if (Math.abs(collisionY - wall.y) < ballRadius) {
-        collisionY = wall.y + ballRadius; // Hit top side
-      } else if (Math.abs(collisionY - (wall.y + wall.height)) < ballRadius) {
-        collisionY = wall.y + wall.height - ballRadius; // Hit bottom side
+      // For goals, position ball at the edge (entering goal)
+      // For walls, position ball outside (bouncing off)
+      if (obj.type.startsWith('goal')) {
+        // Goals: Position ball just at the goal edge for smooth entry
+        if (Math.abs(collisionX - obj.x) < ballRadius) {
+          collisionX = obj.x + ballRadius * 0.5; // Slightly inside left edge
+        } else if (Math.abs(collisionX - (obj.x + obj.width)) < ballRadius) {
+          collisionX = obj.x + obj.width - ballRadius * 0.5; // Slightly inside right edge
+        }
+        
+        if (Math.abs(collisionY - obj.y) < ballRadius) {
+          collisionY = obj.y + ballRadius * 0.5; // Slightly inside top edge
+        } else if (Math.abs(collisionY - (obj.y + obj.height)) < ballRadius) {
+          collisionY = obj.y + obj.height - ballRadius * 0.5; // Slightly inside bottom edge
+        }
+      } else {
+        // Walls: Position ball outside (original behavior)
+        if (Math.abs(collisionX - obj.x) < ballRadius) {
+          collisionX = obj.x + ballRadius; // Hit left side
+        } else if (Math.abs(collisionX - (obj.x + obj.width)) < ballRadius) {
+          collisionX = obj.x + obj.width - ballRadius; // Hit right side
+        }
+        
+        if (Math.abs(collisionY - obj.y) < ballRadius) {
+          collisionY = obj.y + ballRadius; // Hit top side
+        } else if (Math.abs(collisionY - (obj.y + obj.height)) < ballRadius) {
+          collisionY = obj.y + obj.height - ballRadius; // Hit bottom side
+        }
       }
       
       return {
         hit: true,
         point: { x: collisionX, y: collisionY },
-        wall: wall
+        object: obj
       };
     }
     
@@ -2864,10 +2865,8 @@ class MainScene extends Phaser.Scene {
           this.movementDirection.x = this.targetDirection.x;
           this.movementDirection.y = this.targetDirection.y;
           
-          // Update aim target to be in the direction of movement
-          const aimDistance = 100; // How far ahead to aim
-          this.aimTarget.x = this.ship.x + this.movementDirection.x * aimDistance;
-          this.aimTarget.y = this.ship.y + this.movementDirection.y * aimDistance;
+          // DO NOT update aim target based on movement - cannon is independent
+          // Aim target is only controlled by touch-to-aim system
         } else {
           // If no input, stop immediately
           this.movementDirection.x = 0;
@@ -2931,8 +2930,8 @@ class MainScene extends Phaser.Scene {
         // Update ship animation based on movement direction
         this.updateShipAnimation(this.ship, this.movementDirection, true);
         
-        // Update cannon position after animation change
-        this.updateCannonPosition();
+        // DO NOT update cannon position based on ship movement for mobile
+        // Cannon is controlled by touch-to-aim system only
       }
     } else if (this.movementDirection.x !== 0 || this.movementDirection.y !== 0) {
       // Update ship animation based on movement direction
@@ -3231,11 +3230,11 @@ class MainScene extends Phaser.Scene {
     // Create/update the score pie chart at the top center
     this.createScorePieChart();
     
-    // Hide legacy score display
-    if (this.scoreLabel) this.scoreLabel.setVisible(false);
-    if (this.redScoreText) this.redScoreText.setVisible(false);
-    if (this.scoreSeparator) this.scoreSeparator.setVisible(false);
-    if (this.blueScoreText) this.blueScoreText.setVisible(false);
+    // Hide legacy score display (completely hidden for mobile, normal visibility for desktop)
+    if (this.scoreLabel) this.scoreLabel.setVisible(!this.isMobile);
+    if (this.redScoreText) this.redScoreText.setVisible(!this.isMobile);
+    if (this.scoreSeparator) this.scoreSeparator.setVisible(!this.isMobile);
+    if (this.blueScoreText) this.blueScoreText.setVisible(!this.isMobile);
   }
   
   // Handle fast projectile creation through fast channel
@@ -3611,15 +3610,7 @@ class MainScene extends Phaser.Scene {
         this.leftJoystickForceY = 0;
       }
       
-      // Reset right joystick
-      if (this.rightJoystickActive) {
-        this.rightJoystickContainer.setVisible(false);
-        this.rightJoystickLabel.setVisible(false);
-        this.rightJoystickActive = false;
-        this.rightJoystickTouchId = null;
-        this.rightJoystickForceX = 0;
-        this.rightJoystickForceY = 0;
-      }
+      // Right joystick removed - using touch-to-aim system
       
       // Reset input state
       this.inputState.left = false;
@@ -3644,36 +3635,43 @@ class MainScene extends Phaser.Scene {
       }
     }
     
-    // Reposition UI elements
+    // Reposition UI elements - hide debug info for mobile
     if (this.pingText) {
       this.pingText.setScrollFactor(0);
       this.pingText.setPosition(10, 10);
+      this.pingText.setVisible(!this.isMobile); // Hide ping on mobile
     }
     
+    // Legacy score display - keep hidden for mobile
     if (this.scoreLabel) {
       const scoreY = 40;
       this.scoreLabel.setScrollFactor(0);
       this.scoreLabel.setPosition(10, scoreY);
+      this.scoreLabel.setVisible(!this.isMobile); // Hide for mobile
       
       if (this.redScoreText) {
         this.redScoreText.setScrollFactor(0);
         this.redScoreText.setPosition(this.scoreLabel.x + this.scoreLabel.width, scoreY);
+        this.redScoreText.setVisible(!this.isMobile); // Hide for mobile
       }
       
       if (this.scoreSeparator) {
         this.scoreSeparator.setScrollFactor(0);
         this.scoreSeparator.setPosition(this.redScoreText.x + this.redScoreText.width, scoreY);
+        this.scoreSeparator.setVisible(!this.isMobile); // Hide for mobile
       }
       
       if (this.blueScoreText) {
         this.blueScoreText.setScrollFactor(0);
         this.blueScoreText.setPosition(this.scoreSeparator.x + this.scoreSeparator.width, scoreY);
+        this.blueScoreText.setVisible(!this.isMobile); // Hide for mobile
       }
     }
     
-    // Team text position is fixed and doesn't need repositioning on resize
+    // Team text position is fixed and doesn't need repositioning on resize - hide for mobile
     if (this.teamText) {
       this.teamText.setScrollFactor(0); // Ensure it stays fixed to screen
+      this.teamText.setVisible(!this.isMobile); // Hide team text on mobile
     }
     
     // Reposition countdown text to center of screen
@@ -4741,18 +4739,33 @@ class MainScene extends Phaser.Scene {
     this.scorePieChart = this.add.graphics();
     this.scorePieTexts = [];
     
-    // Position at top center of screen
-    const centerX = this.cameras.main.centerX;
-    const centerY = 80; // Top of screen
-    const radius = 50;
+    // Position and size based on device type
+    let centerX, centerY, radius;
+    if (this.isMobile) {
+      // Mobile: smaller chart, positioned below team buttons area
+      centerX = this.cameras.main.centerX;
+      centerY = 180; // Below team buttons
+      radius = 25; // Much smaller for mobile
+    } else {
+      // Desktop: original positioning
+      centerX = this.cameras.main.centerX;
+      centerY = 80; // Top of screen
+      radius = 50;
+    }
     
-    // Team data with scores
-    const teams = [
+    // Team data with scores - filter based on map type
+    let teams = [
       { name: 'Red', color: 0xff0000, score: this.team1Score || 0 },
       { name: 'Blue', color: 0x0078ff, score: this.team2Score || 0 },
       { name: 'Yellow', color: 0xffdc00, score: this.team3Score || 0 },
       { name: 'Green', color: 0x00c800, score: this.team4Score || 0 },
     ];
+    
+    // Filter teams for soccer map (only Red and Blue)
+    if (this.isSoccerMap) {
+      teams = teams.filter(team => team.name === 'Red' || team.name === 'Blue');
+      console.log('Soccer map detected - showing only Red and Blue teams in score chart');
+    }
     
     // Calculate total score for proportional slices
     const totalScore = teams.reduce((sum, team) => sum + team.score, 0);
@@ -4777,12 +4790,13 @@ class MainScene extends Phaser.Scene {
         const midAngle = (startAngle + endAngle) / 2;
         const textX = centerX + Math.cos(midAngle) * (radius * 0.7);
         const textY = centerY + Math.sin(midAngle) * (radius * 0.7);
+        const fontSize = this.isMobile ? '8px' : '12px';
         const text = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
-          font: 'bold 12px Arial',
+          font: `bold ${fontSize} Arial`,
           fill: '#fff',
           align: 'center',
           stroke: '#000',
-          strokeThickness: 2
+          strokeThickness: this.isMobile ? 1 : 2
         }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
         this.scorePieTexts.push(text);
       });
@@ -4808,12 +4822,13 @@ class MainScene extends Phaser.Scene {
           const midAngle = (currentAngle + endAngle) / 2;
           const textX = centerX + Math.cos(midAngle) * (radius * 0.7);
           const textY = centerY + Math.sin(midAngle) * (radius * 0.7);
+          const fontSize = this.isMobile ? '8px' : '12px';
           const text = this.add.text(textX, textY, `${team.name}\n${team.score}`, {
-            font: 'bold 12px Arial',
+            font: `bold ${fontSize} Arial`,
             fill: '#fff',
             align: 'center',
             stroke: '#000',
-            strokeThickness: 2
+            strokeThickness: this.isMobile ? 1 : 2
           }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
           this.scorePieTexts.push(text);
         }
@@ -4822,14 +4837,26 @@ class MainScene extends Phaser.Scene {
       });
     }
     
-    // Add title
-    this.scorePieTitle = this.add.text(centerX, centerY - radius - 20, 'TEAM SCORES', {
-      font: 'bold 16px Arial',
-      fill: '#ffffff',
-      align: 'center',
-      stroke: '#000',
-      strokeThickness: 2
-    }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+    // Add title - smaller for mobile or hidden
+    if (this.isMobile) {
+      // Mobile: smaller title or no title for cleaner look
+      this.scorePieTitle = this.add.text(centerX, centerY - radius - 15, 'SCORES', {
+        font: 'bold 10px Arial',
+        fill: '#ffffff',
+        align: 'center',
+        stroke: '#000',
+        strokeThickness: 1
+      }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+    } else {
+      // Desktop: full title
+      this.scorePieTitle = this.add.text(centerX, centerY - radius - 20, 'TEAM SCORES', {
+        font: 'bold 16px Arial',
+        fill: '#ffffff',
+        align: 'center',
+        stroke: '#000',
+        strokeThickness: 2
+      }).setOrigin(0.5).setScrollFactor(0).setDepth(1001);
+    }
     
     this.scorePieChart.setScrollFactor(0).setDepth(1000);
   }
@@ -4842,12 +4869,18 @@ class MainScene extends Phaser.Scene {
     this.teamSwitchTexts = [];
     this.teamPieHits = [];
     const centerX = 120, centerY = 120, radius = 90;
-    const teams = [
+    let teams = [
       { name: 'Red', color: 0xff0000, score: this.team1Score || 0, key: 'red' },
       { name: 'Blue', color: 0x0078ff, score: this.team2Score || 0, key: 'blue' },
       { name: 'Yellow', color: 0xffdc00, score: this.team3Score || 0, key: 'yellow' },
       { name: 'Green', color: 0x00c800, score: this.team4Score || 0, key: 'green' },
     ];
+    
+    // Filter teams for soccer map (only Red and Blue)
+    if (this.isSoccerMap) {
+      teams = teams.filter(team => team.key === 'red' || team.key === 'blue');
+      console.log('Soccer map detected - showing only Red and Blue teams in team menu');
+    }
     const anglePer = (2 * Math.PI) / teams.length;
     teams.forEach((team, i) => {
       const startAngle = i * anglePer - Math.PI/2;
@@ -4966,34 +4999,7 @@ const config = {
   scene: MainScene
 };
   
-// Add fullscreen button for mobile
-if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
-  // Create fullscreen button after game loads
-  window.addEventListener('DOMContentLoaded', () => {
-    const fullscreenBtn = document.createElement('button');
-    fullscreenBtn.innerHTML = '📱 Fullscreen';
-    fullscreenBtn.style.position = 'absolute';
-    fullscreenBtn.style.bottom = '10px';
-    fullscreenBtn.style.right = '10px';
-    fullscreenBtn.style.zIndex = '1000';
-    fullscreenBtn.style.padding = '10px';
-    fullscreenBtn.style.backgroundColor = '#4CAF50';
-    fullscreenBtn.style.color = 'white';
-    fullscreenBtn.style.border = 'none';
-    fullscreenBtn.style.borderRadius = '5px';
-    fullscreenBtn.style.fontSize = '16px';
-    
-    fullscreenBtn.addEventListener('click', () => {
-      if (game.scale.isFullscreen) {
-        game.scale.stopFullscreen();
-      } else {
-        game.scale.startFullscreen();
-      }
-    });
-    
-    document.getElementById('game-container').appendChild(fullscreenBtn);
-  });
-}
+// Fullscreen button removed for cleaner mobile UI
 
 const game = new Phaser.Game(config);
 
