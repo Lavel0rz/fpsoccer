@@ -576,20 +576,13 @@ class MainScene extends Phaser.Scene {
     // Reset connection tracking
     window.activeConnections = window.activeConnections || 0;
     
-    // Add a delay before connecting to the game server
-    console.log('Waiting 2 seconds before connecting to game server...');
+    // Connect immediately without delay
     this.connectionAttempt = 1;
     this.isConnecting = false;
     this.connectionEstablished = false;
     
-    // Set up connection timeout
-    if (this.connectionTimeout) {
-        clearTimeout(this.connectionTimeout);
-    }
-    
-    this.connectionTimeout = setTimeout(() => {
-        this.connectToGameServer();
-    }, this.isMobile ? 3000 : 2000); // Longer delay for mobile
+    // Connect immediately
+    this.connectToGameServer();
   }
   
   connectToGameServer() {

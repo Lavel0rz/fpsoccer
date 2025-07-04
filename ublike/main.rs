@@ -29,7 +29,14 @@ static DUAL_CONNECTION_MANAGER: Lazy<Arc<DualConnectionManager>> = Lazy::new(|| 
 #[tokio::main]
 async fn main() {
     println!("Loaded map objects: {:?}", *crate::game::MAP_OBJECTS);
-    println!("Starting server with single port configuration (8080)");
+    
+    // Read port from environment variable, default to 8080
+    let port: u16 = std::env::var("GAME_PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .unwrap_or(8080);
+    
+    println!("Starting server on port {}", port);
     
     // Create routes for both the lobby server and the default game server
     
@@ -114,10 +121,10 @@ async fn main() {
         .or(webtransport_route)
         .with(warp::cors().allow_any_origin());
     
-    println!("WebSocket server listening on ws://0.0.0.0:8080");
-    println!("Fast channel route available at ws://0.0.0.0:8080/fast");
-    println!("Lobby server available at ws://0.0.0.0:8080/lobby");
-    println!("Game-specific endpoints available at ws://0.0.0.0:8080/game/{{GAME_ID}}/ws");
+    println!("WebSocket server listening on ws://0.0.0.0:{}", port);
+    println!("Fast channel route available at ws://0.0.0.0:{}/fast", port);
+    println!("Lobby server available at ws://0.0.0.0:{}/lobby", port);
+    println!("Game-specific endpoints available at ws://0.0.0.0:{}/game/{{GAME_ID}}/ws", port);
     println!("WebTransport ultra-low latency server starting on https://0.0.0.0:8443");
     
     // Start the main game loop for the default game instance in a separate task
@@ -156,7 +163,7 @@ async fn main() {
     });
     
     warp::serve(routes)
-        .run(([0, 0, 0, 0], 8080))
+        .run(([0, 0, 0, 0], port))
         .await;
 }
 

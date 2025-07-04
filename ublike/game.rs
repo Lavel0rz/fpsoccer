@@ -350,7 +350,7 @@ impl Game {
             if let Some(owner_id) = self.ball.owner {
                 if let Some(player) = self.players.get_mut(&owner_id) {
                     // Scale the shot clock to 0-200 range for the boost UI
-                    player.boost = (self.ball.shot_clock / 10.0) * 200.0;
+                    player.fuel = (self.ball.shot_clock / 10.0) * 200.0;
                 }
             }
             
@@ -1343,7 +1343,7 @@ impl Game {
                 x: player.ship.x,
                 y: player.ship.y,
                 seq: player.last_seq,
-                boost: player.boost,
+                fuel: player.fuel,
                 team: player.team,
                 display_name: player.display_name.clone(),
                 rocket_cooldown: player.rocket_cooldown,

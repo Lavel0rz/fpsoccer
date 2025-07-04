@@ -322,8 +322,8 @@
         pingInterval = null;
       }
       
-      // Create a new WebSocket connection
-      let wsUrl = 'wss://towerup.io/lobby';
+              // Create a new WebSocket connection
+        let wsUrl = 'wss://towerup.io/ws';
       
       debugLog('Connecting to WebSocket at:', wsUrl);
       
@@ -555,11 +555,11 @@
           // For mobile, redirect immediately to reduce connection issues
           if (isMobileBrowser()) {
             console.log('Mobile: Redirecting immediately to game after creation');
-            window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}&auto_start=true`;
+            window.location.href = `game.html?game_id=${message.game.id}&port=${message.game.port}&auto_start=true`;
           } else {
             showNotification(`Game created! Redirecting to game...`);
             setTimeout(() => {
-              window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}`;
+              window.location.href = `game.html?game_id=${message.game.id}&port=${message.game.port}`;
             }, 1000);
           }
           break;
@@ -568,11 +568,11 @@
           // For mobile, redirect immediately to reduce connection issues
           if (isMobileBrowser()) {
             console.log('Mobile: Redirecting immediately to game after joining');
-            window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}&auto_start=true`;
+            window.location.href = `game.html?game_id=${message.game.id}&port=${message.game.port}&auto_start=true`;
           } else {
             showNotification(`Joined game! Redirecting...`);
             setTimeout(() => {
-              window.location.href = `game.html?game_id=${message.game_id}&port=${message.port}`;
+              window.location.href = `game.html?game_id=${message.game.id}&port=${message.game.port}`;
             }, 1000);
           }
           break;
@@ -647,9 +647,8 @@
       const createGameMsg = {
         type: "create_game",
         name: gameName,
-        max_players: maxPlayers,
-        is_public: isPublic,
-        display_name: displayName
+        creator: displayName,
+        isPublic: isPublic
       };
       
       socket.send(JSON.stringify(createGameMsg));
@@ -672,8 +671,8 @@
       
       const joinGameMsg = {
         type: "join_game",
-        game_id: gameId,
-        display_name: displayName
+        gameId: gameId,
+        playerName: displayName
       };
       
       socket.send(JSON.stringify(joinGameMsg));
@@ -694,7 +693,7 @@
       refreshGamesBtn.textContent = 'Refreshing...';
       
       const message = {
-        type: 'list_games'
+        type: 'get_games'
       };
       
       socket.send(JSON.stringify(message));

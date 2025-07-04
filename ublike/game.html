@@ -163,6 +163,13 @@
       display: none;
     }
     
+    /* Hide connection status on mobile for cleaner UI */
+    @media (max-width: 768px) {
+      #connection-status {
+        display: none !important;
+      }
+    }
+    
     .error {
       background-color: #ff5252 !important;
       color: white;
@@ -307,9 +314,9 @@
       window.location.href = 'lobby.html';
     }
     
-    // Set the WebSocket URL - use game-specific path
-    window.WEBSOCKET_URL = gameId 
-        ? `wss://towerup.io/game/${gameId}/ws` 
+    // Set the WebSocket URL - exact server path format
+    window.WEBSOCKET_URL = (gameId && port)
+        ? `wss://towerup.io/port/${port}/game/${gameId}/ws`
         : `wss://towerup.io/ws`;
     console.log('WebSocket URL:', window.WEBSOCKET_URL);
     
@@ -340,7 +347,7 @@
       connectionStatus.textContent = 'Testing connection to game server...';
       connectionStatus.className = 'status loading';
       
-      console.log('Attempting to connect to:', window.WEBSOCKET_URL);
+      console.log('Will attempt to connect to:', window.WEBSOCKET_URL);
       
       // Close any existing test socket
       if (window.testSocket && window.testSocket.readyState !== WebSocket.CLOSED) {
@@ -349,19 +356,14 @@
         window.testSocket = null;
       }
       
-      // Add a delay before the first connection attempt to give the server time to start
-      const initialDelay = isMobileBrowser() ? 3000 : 2000; // Longer delay for mobile
-      console.log(`Waiting ${initialDelay/1000} seconds before first connection attempt...`);
-      
-      setTimeout(() => {
-        attemptConnection(1); // Start with attempt #1
-      }, initialDelay);
+      // Connect immediately without delay
+      attemptConnection(1); // Start with attempt #1
     }
     
     // Attempt connection with exponential backoff
     function attemptConnection(attemptNumber) {
       // Limit the number of attempts
-      if (attemptNumber > 5) {
+      if (attemptNumber > 10) { // Increased from 5 to 10 attempts
         console.log('Maximum connection attempts reached');
         connectionStatus.textContent = 'Could not connect after multiple attempts. Please refresh the page.';
         connectionStatus.className = 'status error';
@@ -382,7 +384,7 @@
         window.testSocket = testSocket; // Store reference for cleanup
         
         // Increase timeout for later attempts
-        const timeoutDuration = Math.min(5000 + (attemptNumber * 1000), 15000);
+        const timeoutDuration = Math.min(10000 + (attemptNumber * 2000), 30000); // Longer timeouts
         
         let connectionTimeout = setTimeout(() => {
           if (testSocket.readyState !== WebSocket.OPEN) {
@@ -395,8 +397,8 @@
             connectionStatus.className = 'status error';
             startButton.disabled = true;
             
-            // Exponential backoff for retry
-            const retryDelay = Math.min(1000 * Math.pow(1.5, attemptNumber), 10000);
+            // Exponential backoff for retry with longer delays
+            const retryDelay = Math.min(2000 * Math.pow(1.5, attemptNumber), 20000);
             console.log(`Will retry in ${retryDelay/1000} seconds (attempt #${attemptNumber + 1})`);
             
             setTimeout(() => {
@@ -426,7 +428,7 @@
               testSocket.close();
             }
             window.testSocket = null;
-          }, 500);
+          }, 1000); // Increased from 500ms to 1000ms
         });
         
         testSocket.addEventListener('error', (error) => {
