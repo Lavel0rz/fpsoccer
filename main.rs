@@ -1,16 +1,14 @@
-
-use warp::Filter;
-use futures::{StreamExt, SinkExt};
+use chrono::Utc;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::time::{sleep, Duration};
-use tokio::sync::Mutex;
-use once_cell::sync::Lazy;
-use std::sync::Arc;
 use std::collections::HashMap;
-use warp::ws::{WebSocket, Message};
-use futures::stream::SplitSink;
-use chrono::Utc;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::{Duration as StdDuration, Instant};
+use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 
 // --- Map Object Definitions and Loading ---
 #[derive(Deserialize, Debug)]
@@ -25,10 +23,9 @@ struct MapObject {
 
 // Load the map_data.json file at compile time.
 static MAP_OBJECTS: Lazy<Vec<MapObject>> = Lazy::new(|| {
-    let json_str = include_str!("../.././client/assets/map_data.json");
+    let json_str = include_str!("./assets/map_data.json");
     serde_json::from_str(json_str).expect("Failed to parse map_data.json")
 });
-
 
 // --- Ping Message Types ---
 #[derive(Serialize, Deserialize)]
@@ -87,6 +84,7 @@ struct Player {
     velocity: (f32, f32),
     shoot_cooldown: f32,
     boost: f32,
+    last_seen: Instant,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,8 +97,8 @@ struct GameStateSnapshot {
 struct Game {
     ball: Ball,
     players: HashMap<u32, Player>,
-    // Each client's sender is stored as an Arc<Mutex<SplitSink<WebSocket, Message>>>
-    clients: HashMap<u32, Arc<Mutex<SplitSink<WebSocket, Message>>>>,
+    clients: HashMap<u32, SocketAddr>,
+    addr_to_id: HashMap<SocketAddr, u32>,
     next_id: u32,
 }
 
@@ -119,6 +117,7 @@ impl Game {
             },
             players: HashMap::new(),
             clients: HashMap::new(),
+            addr_to_id: HashMap::new(),
             next_id: 1,
         }
     }
@@ -143,8 +142,7 @@ struct InputMessage {
 
 // AABB collision check (used for players, etc.)
 fn aabb_collision(x1: f32, y1: f32, w1: f32, h1: f32, x2: f32, y2: f32, w2: f32, h2: f32) -> bool {
-    x1 < x2 + w2 && x1 + w1 > x2 &&
-    y1 < y2 + h2 && y1 + h1 > y2
+    x1 < x2 + w2 && x1 + w1 > x2 && y1 < y2 + h2 && y1 + h1 > y2
 }
 
 const SHIP_WIDTH: f32 = 40.0;
@@ -163,24 +161,28 @@ fn resolve_rect_collision(ball: &mut Ball, wall: &MapObject) {
     let ball_right = ball.x + BALL_WIDTH / 2.0;
     let ball_top = ball.y - BALL_HEIGHT / 2.0;
     let ball_bottom = ball.y + BALL_HEIGHT / 2.0;
-    
+
     let wall_left = wall.x + WALL_COLLISION_INSET;
     let wall_right = wall.x + wall.width - WALL_COLLISION_INSET;
     let wall_top = wall.y + WALL_COLLISION_INSET;
     let wall_bottom = wall.y + wall.height - WALL_COLLISION_INSET;
-    
+
     let overlap_x = if ball_right > wall_left && ball_left < wall_right {
         let overlap_left = ball_right - wall_left;
         let overlap_right = wall_right - ball_left;
         overlap_left.min(overlap_right)
-    } else { 0.0 };
-    
+    } else {
+        0.0
+    };
+
     let overlap_y = if ball_bottom > wall_top && ball_top < wall_bottom {
         let overlap_top = ball_bottom - wall_top;
         let overlap_bottom = wall_bottom - ball_top;
         overlap_top.min(overlap_bottom)
-    } else { 0.0 };
-    
+    } else {
+        0.0
+    };
+
     if overlap_x > 0.0 && overlap_y > 0.0 {
         if overlap_x < overlap_y {
             if ball.x < wall.x {
@@ -209,15 +211,17 @@ fn resolve_ship_collision(ship: &mut Ship, velocity: &mut (f32, f32), wall: &Map
     let ship_right = ship.x + SHIP_WIDTH / 2.0;
     let ship_top = ship.y - SHIP_HEIGHT / 2.0;
     let ship_bottom = ship.y + SHIP_HEIGHT / 2.0;
-    
+
     let wall_left = wall.x;
     let wall_right = wall.x + wall.width;
     let wall_top = wall.y;
     let wall_bottom = wall.y + wall.height;
-    
-    if ship_right > wall_left && ship_left < wall_right &&
-       ship_bottom > wall_top && ship_top < wall_bottom {
-        
+
+    if ship_right > wall_left
+        && ship_left < wall_right
+        && ship_bottom > wall_top
+        && ship_top < wall_bottom
+    {
         let overlap_x = if ship_right - wall_left < wall_right - ship_left {
             ship_right - wall_left
         } else {
@@ -228,7 +232,7 @@ fn resolve_ship_collision(ship: &mut Ship, velocity: &mut (f32, f32), wall: &Map
         } else {
             wall_bottom - ship_top
         };
-        
+
         // Resolve along the axis of minimal penetration.
         if overlap_x < overlap_y {
             if ship.x < wall.x {
@@ -251,75 +255,102 @@ fn resolve_ship_collision(ship: &mut Ship, velocity: &mut (f32, f32), wall: &Map
 #[tokio::main]
 async fn main() {
     println!("Loaded map objects: {:?}", *MAP_OBJECTS);
-    let _game_loop = tokio::spawn(game_update_loop());
-    
-    let ws_route = warp::path("ws")
-        .and(warp::ws())
-        .and(with_game(GLOBAL_GAME.clone()))
-        .map(|ws: warp::ws::Ws, game: Arc<Mutex<Game>>| {
-            ws.on_upgrade(move |socket| handle_connection(socket, game))
-        });
-    let routes = ws_route.with(warp::cors().allow_any_origin());
-    
-    println!("WebSocket server listening on ws://0.0.0.0:8080/ws");
-    warp::serve(routes).run(([0, 0, 0, 0], 8080)).await;
+    let socket = Arc::new(
+        UdpSocket::bind(("0.0.0.0", 8080))
+            .await
+            .expect("Failed to bind UDP socket"),
+    );
+    println!("UDP game server listening on 0.0.0.0:8080");
+
+    let update_socket = Arc::clone(&socket);
+    tokio::spawn(async move {
+        game_update_loop(update_socket).await;
+    });
+
+    if let Err(e) = udp_receive_loop(Arc::clone(&socket), GLOBAL_GAME.clone()).await {
+        eprintln!("UDP receive loop terminated: {:?}", e);
+    }
 }
 
-fn with_game(game: Arc<Mutex<Game>>) -> impl warp::Filter<Extract = (Arc<Mutex<Game>>,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || game.clone())
-}
-
-async fn game_update_loop() {
+async fn game_update_loop(socket: Arc<UdpSocket>) {
     let fixed_dt = 0.1;
     let sub_steps = 5;
     let sub_dt = fixed_dt / sub_steps as f32;
     let game_width = 2000.0;
     let game_height = 1200.0;
+    let player_timeout = StdDuration::from_secs(10);
     loop {
-        {
+        let (snapshot_bytes, recipients) = {
             let mut game = GLOBAL_GAME.lock().await;
-            
+
             // Update cooldowns.
             if game.ball.grab_cooldown > 0.0 {
                 game.ball.grab_cooldown -= fixed_dt;
-                if game.ball.grab_cooldown < 0.0 { game.ball.grab_cooldown = 0.0; }
+                if game.ball.grab_cooldown < 0.0 {
+                    game.ball.grab_cooldown = 0.0;
+                }
             }
             for player in game.players.values_mut() {
                 if player.shoot_cooldown > 0.0 {
                     player.shoot_cooldown -= fixed_dt;
-                    if player.shoot_cooldown < 0.0 { player.shoot_cooldown = 0.0; }
+                    if player.shoot_cooldown < 0.0 {
+                        player.shoot_cooldown = 0.0;
+                    }
                 }
             }
             for player in game.players.values_mut() {
                 if !player.input.boost && player.boost < 200.0 {
                     player.boost += 10.0 * fixed_dt;
-                    if player.boost > 200.0 { player.boost = 200.0; }
+                    if player.boost > 200.0 {
+                        player.boost = 200.0;
+                    }
                 }
             }
-            
+
             // --- Update players' ships ---
             let ball_grabbed = game.ball.grabbed;
             let ball_owner = game.ball.owner;
             for player in game.players.values_mut() {
-                let slowdown = if ball_grabbed && ball_owner == Some(player.id) { 0.8 } else { 1.0 };
-                let boost_multiplier = if player.input.boost && player.boost > 0.0 { 2.0 } else { 1.0 };
+                let slowdown = if ball_grabbed && ball_owner == Some(player.id) {
+                    0.8
+                } else {
+                    1.0
+                };
+                let boost_multiplier = if player.input.boost && player.boost > 0.0 {
+                    2.0
+                } else {
+                    1.0
+                };
                 if player.input.boost && player.boost > 0.0 {
                     player.boost -= 40.0 * fixed_dt;
-                    if player.boost < 0.0 { player.boost = 0.0; }
+                    if player.boost < 0.0 {
+                        player.boost = 0.0;
+                    }
                 }
                 let acceleration = 200.0 * slowdown * boost_multiplier;
                 let max_speed = 100.0 * slowdown * boost_multiplier;
                 let mut ax: f32 = 0.0;
                 let mut ay: f32 = 0.0;
-                if player.input.left { ax -= acceleration; }
-                if player.input.right { ax += acceleration; }
-                if player.input.up { ay -= acceleration; }
-                if player.input.down { ay += acceleration; }
-                
-                if ax.abs() > acceleration * 1.5 || ay.abs() > acceleration * 1.5 {
-                    eprintln!("Suspicious acceleration from player {}: ax={}, ay={}", player.id, ax, ay);
+                if player.input.left {
+                    ax -= acceleration;
                 }
-                
+                if player.input.right {
+                    ax += acceleration;
+                }
+                if player.input.up {
+                    ay -= acceleration;
+                }
+                if player.input.down {
+                    ay += acceleration;
+                }
+
+                if ax.abs() > acceleration * 1.5 || ay.abs() > acceleration * 1.5 {
+                    eprintln!(
+                        "Suspicious acceleration from player {}: ax={}, ay={}",
+                        player.id, ax, ay
+                    );
+                }
+
                 player.velocity.0 += ax * fixed_dt;
                 player.velocity.1 += ay * fixed_dt;
                 let friction = 0.8;
@@ -336,7 +367,7 @@ async fn game_update_loop() {
                 player.ship.x = player.ship.x.clamp(0.0, game_width);
                 player.ship.y = player.ship.y.clamp(0.0, game_height);
             }
-            
+
             // --- Ship-Wall Collision Resolution ---
             // For each player ship, resolve collisions against every wall.
             for player in game.players.values_mut() {
@@ -344,7 +375,7 @@ async fn game_update_loop() {
                     resolve_ship_collision(&mut player.ship, &mut player.velocity, wall);
                 }
             }
-            
+
             // --- Player-Player Collision Resolution ---
             {
                 let collision_radius = 20.0;
@@ -361,15 +392,35 @@ async fn game_update_loop() {
                         let dist = (dx * dx + dy * dy).sqrt();
                         if dist < collision_radius * 2.0 {
                             let overlap = collision_radius * 2.0 - dist;
-                            let (nx, ny) = if dist > 0.0 { (dx / dist, dy / dist) } else { (1.0, 0.0) };
+                            let (nx, ny) = if dist > 0.0 {
+                                (dx / dist, dy / dist)
+                            } else {
+                                (1.0, 0.0)
+                            };
                             let adjustment = (nx * overlap / 2.0, ny * overlap / 2.0);
-                            adjustments.entry(id_i).and_modify(|e| { e.0 += adjustment.0; e.1 += adjustment.1; }).or_insert(adjustment);
-                            adjustments.entry(id_j).and_modify(|e| { e.0 -= adjustment.0; e.1 -= adjustment.1; }).or_insert((-adjustment.0, -adjustment.1));
-                            
+                            adjustments
+                                .entry(id_i)
+                                .and_modify(|e| {
+                                    e.0 += adjustment.0;
+                                    e.1 += adjustment.1;
+                                })
+                                .or_insert(adjustment);
+                            adjustments
+                                .entry(id_j)
+                                .and_modify(|e| {
+                                    e.0 -= adjustment.0;
+                                    e.1 -= adjustment.1;
+                                })
+                                .or_insert((-adjustment.0, -adjustment.1));
+
                             if game.ball.grabbed {
                                 if let Some(owner_id) = game.ball.owner {
                                     if owner_id == id_i || owner_id == id_j {
-                                        if let Some((x, y)) = game.players.get(&owner_id).map(|p| (p.ship.x, p.ship.y)) {
+                                        if let Some((x, y)) = game
+                                            .players
+                                            .get(&owner_id)
+                                            .map(|p| (p.ship.x, p.ship.y))
+                                        {
                                             game.ball.x = x;
                                             game.ball.y = y;
                                         }
@@ -389,7 +440,7 @@ async fn game_update_loop() {
                     }
                 }
             }
-            
+
             // --- Sub-Stepped Ball Physics and Improved Rectangular Wall Collision ---
             {
                 for _ in 0..sub_steps {
@@ -399,17 +450,27 @@ async fn game_update_loop() {
                         let friction = 0.989;
                         game.ball.vx *= friction;
                         game.ball.vy *= friction;
-                        
-                        if game.ball.x - BALL_WIDTH / 2.0 <= 0.0 || game.ball.x + BALL_WIDTH / 2.0 >= game_width {
+
+                        if game.ball.x - BALL_WIDTH / 2.0 <= 0.0
+                            || game.ball.x + BALL_WIDTH / 2.0 >= game_width
+                        {
                             game.ball.vx = -game.ball.vx;
-                            game.ball.x = game.ball.x.clamp(BALL_WIDTH / 2.0, game_width - BALL_WIDTH / 2.0);
+                            game.ball.x = game
+                                .ball
+                                .x
+                                .clamp(BALL_WIDTH / 2.0, game_width - BALL_WIDTH / 2.0);
                         }
-                        if game.ball.y - BALL_HEIGHT / 2.0 <= 0.0 || game.ball.y + BALL_HEIGHT / 2.0 >= game_height {
+                        if game.ball.y - BALL_HEIGHT / 2.0 <= 0.0
+                            || game.ball.y + BALL_HEIGHT / 2.0 >= game_height
+                        {
                             game.ball.vy = -game.ball.vy;
-                            game.ball.y = game.ball.y.clamp(BALL_HEIGHT / 2.0, game_height - BALL_HEIGHT / 2.0);
+                            game.ball.y = game
+                                .ball
+                                .y
+                                .clamp(BALL_HEIGHT / 2.0, game_height - BALL_HEIGHT / 2.0);
                         }
                     }
-                    
+
                     let mut iterations = 0;
                     let max_iterations = 5;
                     loop {
@@ -419,9 +480,12 @@ async fn game_update_loop() {
                             let ball_right = game.ball.x + BALL_WIDTH / 2.0;
                             let ball_top = game.ball.y - BALL_HEIGHT / 2.0;
                             let ball_bottom = game.ball.y + BALL_HEIGHT / 2.0;
-                            
-                            if ball_right > wall.x && ball_left < wall.x + wall.width &&
-                               ball_bottom > wall.y && ball_top < wall.y + wall.height {
+
+                            if ball_right > wall.x
+                                && ball_left < wall.x + wall.width
+                                && ball_bottom > wall.y
+                                && ball_top < wall.y + wall.height
+                            {
                                 resolve_rect_collision(&mut game.ball, wall);
                                 collision_occurred = true;
                             }
@@ -433,7 +497,7 @@ async fn game_update_loop() {
                     }
                 }
             }
-            
+
             // --- Process ball grabbing ---
             {
                 if !game.ball.grabbed && game.ball.grab_cooldown == 0.0 {
@@ -443,7 +507,7 @@ async fn game_update_loop() {
                     let mut new_y = 0.0;
                     let current_ball_x = game.ball.x;
                     let current_ball_y = game.ball.y;
-                    
+
                     for player in game.players.values() {
                         let dx = player.ship.x - current_ball_x;
                         let dy = player.ship.y - current_ball_y;
@@ -465,25 +529,33 @@ async fn game_update_loop() {
                     }
                 }
             }
-            
+
             // --- Process shooting using impulse ---
             if game.ball.grabbed {
                 if let Some(owner_id) = game.ball.owner {
                     if let Some(player) = game.players.get(&owner_id) {
                         if player.input.shoot && player.shoot_cooldown <= 0.0 {
-                            let target_x = player.input.target_x.unwrap_or(player.ship.x).clamp(0.0, game_width);
-                            let target_y = player.input.target_y.unwrap_or(player.ship.y).clamp(0.0, game_height);
-                            
+                            let target_x = player
+                                .input
+                                .target_x
+                                .unwrap_or(player.ship.x)
+                                .clamp(0.0, game_width);
+                            let target_y = player
+                                .input
+                                .target_y
+                                .unwrap_or(player.ship.y)
+                                .clamp(0.0, game_height);
+
                             let mut dx = target_x - player.ship.x;
                             let mut dy = target_y - player.ship.y;
                             let mut mag = (dx * dx + dy * dy).sqrt();
-                            
+
                             if mag < 1.0 {
                                 dx = 0.0;
                                 dy = -1.0;
                                 mag = 1.0;
                             }
-                            
+
                             let max_allowed = 500.0;
                             if mag > max_allowed {
                                 let scale = max_allowed / mag;
@@ -491,158 +563,186 @@ async fn game_update_loop() {
                                 dy *= scale;
                                 mag = max_allowed;
                             }
-                            
+
                             if mag > max_allowed * 0.9 {
-                                eprintln!("Player {} shooting with near-max impulse: mag={}", owner_id, mag);
+                                eprintln!(
+                                    "Player {} shooting with near-max impulse: mag={}",
+                                    owner_id, mag
+                                );
                             }
-                            
+
                             let ship_mass = 1.0;
                             let ball_mass = 0.5;
                             let base_shot_force = 1400.0;
                             let dt = fixed_dt;
-                            
+
                             let aim_norm = (dx / mag, dy / mag);
-                            let impulse_base = (aim_norm.0 * base_shot_force * dt, aim_norm.1 * base_shot_force * dt);
-                            let additional_impulse = (player.velocity.0 * dt, player.velocity.1 * dt);
-                            let total_impulse = (impulse_base.0 + additional_impulse.0, impulse_base.1 + additional_impulse.1);
-                            
+                            let impulse_base = (
+                                aim_norm.0 * base_shot_force * dt,
+                                aim_norm.1 * base_shot_force * dt,
+                            );
+                            let additional_impulse =
+                                (player.velocity.0 * dt, player.velocity.1 * dt);
+                            let total_impulse = (
+                                impulse_base.0 + additional_impulse.0,
+                                impulse_base.1 + additional_impulse.1,
+                            );
+
                             let (ship_x, ship_y) = (player.ship.x, player.ship.y);
-                            
+
                             game.ball.vx = total_impulse.0 / ball_mass;
                             game.ball.vy = total_impulse.1 / ball_mass;
                             game.ball.x = ship_x;
                             game.ball.y = ship_y;
-                            
+
                             game.ball.grab_cooldown = 0.5;
-                            
+
                             if let Some(player_mut) = game.players.get_mut(&owner_id) {
                                 let recoil_factor = 1.0;
-                                player_mut.velocity.0 -= (total_impulse.0 / ship_mass) * recoil_factor;
-                                player_mut.velocity.1 -= (total_impulse.1 / ship_mass) * recoil_factor;
+                                player_mut.velocity.0 -=
+                                    (total_impulse.0 / ship_mass) * recoil_factor;
+                                player_mut.velocity.1 -=
+                                    (total_impulse.1 / ship_mass) * recoil_factor;
                                 player_mut.shoot_cooldown = 0.25;
                                 player_mut.input.shoot = false;
                             }
-                            
+
                             game.ball.grabbed = false;
                             game.ball.owner = None;
                         }
                     }
                 }
             }
-            
-            // --- Build and broadcast game state ---
+
+            // --- Remove inactive players ---
+            let now_instant = Instant::now();
+            let inactive_ids: Vec<u32> = game
+                .players
+                .iter()
+                .filter(|(_, player)| now_instant.duration_since(player.last_seen) > player_timeout)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in inactive_ids {
+                if let Some(addr) = game.clients.remove(&id) {
+                    game.addr_to_id.remove(&addr);
+                    println!("Removing inactive player {} from {}", id, addr);
+                }
+                game.players.remove(&id);
+            }
+
+            // --- Build snapshot ---
             let now = Utc::now().timestamp_millis() as u64;
             let mut players_snapshot = HashMap::new();
             for (id, player) in game.players.iter() {
-                players_snapshot.insert(*id, ShipState {
-                    x: player.ship.x,
-                    y: player.ship.y,
-                    seq: player.last_seq,
-                    boost: player.boost,
-                });
+                players_snapshot.insert(
+                    *id,
+                    ShipState {
+                        x: player.ship.x,
+                        y: player.ship.y,
+                        seq: player.last_seq,
+                        boost: player.boost,
+                    },
+                );
             }
             let snapshot = json!(GameStateSnapshot {
                 time: now,
                 players: players_snapshot,
                 ball: game.ball.clone(),
             });
-            let snapshot_str = snapshot.to_string();
-            // For each client, spawn a task to delay sending the snapshot by 50ms.
-            for (_id, sender) in game.clients.iter_mut() {
-                let msg = snapshot_str.clone();
-                let sender = Arc::clone(sender);
-                tokio::spawn(async move {
-                    sleep(Duration::from_millis(0)).await;
-                    let _ = sender.lock().await.send(Message::text(msg)).await;
-                });
+            let snapshot_bytes = snapshot.to_string().into_bytes();
+            let recipients = game.clients.values().copied().collect::<Vec<_>>();
+            (snapshot_bytes, recipients)
+        };
+
+        for addr in recipients {
+            if let Err(e) = socket.send_to(&snapshot_bytes, addr).await {
+                eprintln!("Failed to send snapshot to {}: {:?}", addr, e);
             }
         }
+
         sleep(Duration::from_millis((fixed_dt * 700.0) as u64)).await;
     }
 }
 
-async fn handle_connection(ws: WebSocket, game: Arc<Mutex<Game>>) {
-    let (tx, mut rx) = ws.split();
-    let tx = Arc::new(Mutex::new(tx));
+async fn udp_receive_loop(socket: Arc<UdpSocket>, game: Arc<Mutex<Game>>) -> std::io::Result<()> {
+    let mut buf = vec![0u8; 4096];
+    loop {
+        let (len, addr) = socket.recv_from(&mut buf).await?;
+        let msg = match std::str::from_utf8(&buf[..len]) {
+            Ok(text) => text,
+            Err(_) => {
+                eprintln!("Received non-UTF8 packet from {}", addr);
+                continue;
+            }
+        };
 
-    let player_id = {
-        let mut game_lock = game.lock().await;
-        let id = game_lock.next_id;
-        game_lock.next_id += 1;
-        game_lock.players.insert(id, Player {
-            id,
-            ship: Ship { x: 400.0, y: 300.0 },
-            input: InputState::default(),
-            last_seq: 0,
-            velocity: (0.0, 0.0),
-            shoot_cooldown: 0.0,
-            boost: 200.0,
-        });
-        game_lock.clients.insert(id, Arc::clone(&tx));
-        id
-    };
+        let mut responses: Vec<String> = Vec::new();
 
-    println!("New player connected: {}", player_id);
-
-    {
-        let init_msg = json!({ "your_id": player_id });
-        let _ = tx.lock().await.send(Message::text(init_msg.to_string())).await;
-    }
-
-    while let Some(result) = rx.next().await {
-        match result {
-            Ok(msg) => {
-                if msg.is_text() {
-                    let txt = msg.to_str().unwrap_or("");
-                    // Check for ping messages.
-                    if let Ok(ping_msg) = serde_json::from_str::<PingMessage>(txt) {
-                        match ping_msg {
-                            PingMessage::Ping { timestamp } => {
-                                // Respond immediately with a pong.
-                                let pong = PingMessage::Pong { timestamp };
-                                let pong_text = serde_json::to_string(&pong).unwrap();
-                                let _ = tx.lock().await.send(Message::text(pong_text)).await;
-                                continue;
-                            }
-                            _ => {}
-                        }
-                    }
-                    // Otherwise, parse as regular input.
-                    match serde_json::from_str::<InputMessage>(txt) {
-                        Ok(input_msg) => {
-                            let mut game_lock = game.lock().await;
-                            if let Some(player) = game_lock.players.get_mut(&player_id) {
-                                player.input.left = input_msg.left;
-                                player.input.right = input_msg.right;
-                                player.input.up = input_msg.up;
-                                player.input.down = input_msg.down;
-                                if let Some(shoot) = input_msg.shoot {
-                                    player.input.shoot = shoot;
-                                }
-                                if let Some(boost) = input_msg.boost {
-                                    player.input.boost = boost;
-                                }
-                                player.input.target_x = input_msg.target_x;
-                                player.input.target_y = input_msg.target_y;
-                                if input_msg.seq > player.last_seq {
-                                    player.last_seq = input_msg.seq;
-                                }
-                            }
+        {
+            let mut game_lock = game.lock().await;
+            let player_id = match game_lock.addr_to_id.get(&addr).copied() {
+                Some(id) => id,
+                None => {
+                    let id = game_lock.next_id;
+                    game_lock.next_id += 1;
+                    game_lock.players.insert(
+                        id,
+                        Player {
+                            id,
+                            ship: Ship { x: 400.0, y: 300.0 },
+                            input: InputState::default(),
+                            last_seq: 0,
+                            velocity: (0.0, 0.0),
+                            shoot_cooldown: 0.0,
+                            boost: 200.0,
+                            last_seen: Instant::now(),
                         },
-                        Err(e) => eprintln!("Failed to parse input from player {}: {:?}", player_id, e),
-                    }
-                } else if msg.is_close() {
-                    break;
+                    );
+                    game_lock.clients.insert(id, addr);
+                    game_lock.addr_to_id.insert(addr, id);
+                    responses.push(json!({ "your_id": id }).to_string());
+                    println!("New player {} connected from {}", id, addr);
+                    id
                 }
-            },
-            Err(e) => {
-                eprintln!("WebSocket error for player {}: {:?}", player_id, e);
-                break;
+            };
+
+            if let Some(player) = game_lock.players.get_mut(&player_id) {
+                player.last_seen = Instant::now();
+            }
+
+            if let Ok(ping_msg) = serde_json::from_str::<PingMessage>(msg) {
+                if let PingMessage::Ping { timestamp } = ping_msg {
+                    if let Ok(pong) = serde_json::to_string(&PingMessage::Pong { timestamp }) {
+                        responses.push(pong);
+                    }
+                }
+            } else if let Ok(input_msg) = serde_json::from_str::<InputMessage>(msg) {
+                if let Some(player) = game_lock.players.get_mut(&player_id) {
+                    player.input.left = input_msg.left;
+                    player.input.right = input_msg.right;
+                    player.input.up = input_msg.up;
+                    player.input.down = input_msg.down;
+                    if let Some(shoot) = input_msg.shoot {
+                        player.input.shoot = shoot;
+                    }
+                    if let Some(boost) = input_msg.boost {
+                        player.input.boost = boost;
+                    }
+                    player.input.target_x = input_msg.target_x;
+                    player.input.target_y = input_msg.target_y;
+                    if input_msg.seq > player.last_seq {
+                        player.last_seq = input_msg.seq;
+                    }
+                }
+            } else {
+                eprintln!("Failed to parse message from {}: {}", addr, msg);
+            }
+        }
+
+        for response in responses {
+            if let Err(e) = socket.send_to(response.as_bytes(), addr).await {
+                eprintln!("Failed to send response to {}: {:?}", addr, e);
             }
         }
     }
-    let mut game_lock = game.lock().await;
-    game_lock.players.remove(&player_id);
-    game_lock.clients.remove(&player_id);
-    println!("Player {} disconnected.", player_id);
 }
